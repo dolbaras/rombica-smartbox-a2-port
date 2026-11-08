@@ -1,0 +1,10 @@
+# AP6181 (BCM43362, SDIO id a962): the SlimBOX Wi-Fi HAL (libwifi-hal-common-ext, "multi wifi")
+# detects the chip, loads /vendor/lib/modules/dhd.ko with the /vendor/etc/wifi/40181 paths when
+# Wi-Fi is turned on and unloads it when Wi-Fi is turned off.
+# v1.0 loaded dhd.ko here at boot, like SlimBOX's AP6212 build: the HAL then skipped the chip
+# detection, wrote a garbage firmware_path and crashed on every Wi-Fi off (strlen(NULL) in
+# is_wifi_driver_loaded); now and then system_server lost the HAL and everything touching Wi-Fi
+# (e.g. Settings) hung until a reboot.
+on property:wlan.driver.status=ok
+    chown root wifi /sys/module/dhd/parameters/firmware_path
+    chmod 664 /sys/module/dhd/parameters/firmware_path

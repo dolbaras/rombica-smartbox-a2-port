@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Tue, 6 Oct 2026 15:16:00 +0300
+Subject: [PATCH 4/4] gxl_p271_v1: set the GXLX MPLL load bits
+
+On GXLX a new MPLL n2/sdm setting only reaches the MPLL output while
+the MPLL's load bit is set in SAR_ADC_REG12 (bits 0..2 = MPLL0..2).
+Amlogic's 3.14 clock driver sets it (and the port's Android kernel,
+patch 0005); mainline Linux does not, so audio on Armbian played at the
+248 MHz boot rate (~16% slow). The bits are set once in board_init,
+for every OS.
+---
+ board/amlogic/gxl_p271_v1/gxl_p271_v1.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+index f4105eb..220b782 100644
+--- a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
++++ b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+@@ -42,6 +42,7 @@
+ #include <asm/arch/eth_setup.h>
+ #include <phy.h>
+ #include <asm/cpu_id.h>
++#include <asm/arch/thermal.h>
+ #ifdef DTB_BIND_KERNEL
+ #include "storage.h"
+ #endif
+@@ -382,6 +383,13 @@ int board_init(void)
+ 
+ 	/*Power on GPIOAO_2 for VCC_5V*/
+ 	clrbits_le32(P_AO_GPIO_O_EN_N, ((1<<2)|(1<<18)));
++
++	/* GXLX (S905L2): a new MPLL n2/sdm setting (the audio clocks) reaches the MPLL output only
++	 * while the MPLL's load bit is set in SAR_ADC_REG12 (bits 0..2 = MPLL0..2); Amlogic's own
++	 * 3.14 clock driver sets it, mainline Linux does not know it. Set once here for every OS.
++	 */
++	if (get_cpu_id().family_id == MESON_CPU_MAJOR_ID_GXLX)
++		setbits_le32(SAR_ADC_REG12, 0x7);
+ #ifdef CONFIG_USB_XHCI_AMLOGIC_GXL
+ 	board_usb_init(&g_usb_config_GXL_skt,BOARD_USB_MODE_HOST);
+ #endif /*CONFIG_USB_XHCI_AMLOGIC*/

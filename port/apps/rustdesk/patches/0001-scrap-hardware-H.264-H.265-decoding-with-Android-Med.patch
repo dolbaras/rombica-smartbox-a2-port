@@ -1,0 +1,1154 @@
+From 7e172c9fb74fb62f9a70d999647445932e50891e Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 10:04:27 +0300
+Subject: [PATCH 1/5] scrap: hardware H.264/H.265 decoding with Android
+ MediaCodec
+
+The mediacodec feature did not build (new_decoders() did not exist, the
+Decoder fields had the wrong type, its match arms duplicated the hwcodec
+ones) and, with hwcodec enabled, the software decoder was always chosen
+first. Rewrite it:
+
+- pick a hardware decoder with NV12 output from the codec list the
+  Android side sends (get_codec_info), skipping .secure ones;
+- configure with the real picture size parsed from the SPS of the key
+  frame (0x0 makes Amlogic HEVC allocate 4096x2304 buffers), recreate on
+  size changes;
+- request low latency ("low-latency", "vendor.low-latency.enable");
+- render into the Surface of the Flutter texture when the app has set
+  one (FFI.setVideoSurface): a render thread shows the newest ready
+  frame, the video thread only queues input. No colour conversion and
+  no copies, which a Mali-450 needs at 2560x1080 30 fps;
+- otherwise (no surface, second decoder) ByteBuffer output converted
+  from NV12 with libyuv, honouring stride, slice-height and crop; the
+  ndk 0.7 wrapper returns INFO_OUTPUT_FORMAT/BUFFERS_CHANGED as errors;
+- wait up to 1 s for the first input buffer and frame (the decoder
+  allocates its surface buffers first; the client drops a codec whose
+  first frame fails), report a stall as an error;
+- log the decoder events to logcat (tag rustdesk-mc), the RustDesk log
+  file is often not created on Android.
+
+Decoder: try the media codec before the software decoder; on any error
+drop it and continue with the software decoder (the client requests a
+key frame after a decode error); frames shown on the texture are passed
+on with pixelbuffer = false. Prefer H.264 when the codec choice is Auto
+and a hardware H.264 decoder exists: hardware H.265 decoders may hold
+the last frame until the next one arrives.
+---
+ libs/scrap/src/common/codec.rs      | 128 +++--
+ libs/scrap/src/common/mediacodec.rs | 841 +++++++++++++++++++++++-----
+ src/flutter_ffi.rs                  |   2 -
+ 3 files changed, 785 insertions(+), 186 deletions(-)
+
+diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
+index 9b072e1..2097d65 100644
+--- a/libs/scrap/src/common/codec.rs
++++ b/libs/scrap/src/common/codec.rs
+@@ -8,7 +8,7 @@ use std::{
+ #[cfg(feature = "hwcodec")]
+ use crate::hwcodec::*;
+ #[cfg(feature = "mediacodec")]
+-use crate::mediacodec::{MediaCodecDecoder, H264_DECODER_SUPPORT, H265_DECODER_SUPPORT};
++use crate::mediacodec::MediaCodecDecoder;
+ #[cfg(feature = "vram")]
+ use crate::vram::*;
+ use crate::{
+@@ -113,9 +113,9 @@ pub struct Decoder {
+     #[cfg(feature = "vram")]
+     h265_vram: Option<VRamDecoder>,
+     #[cfg(feature = "mediacodec")]
+-    h264_media_codec: MediaCodecDecoder,
++    h264_media_codec: Option<MediaCodecDecoder>,
+     #[cfg(feature = "mediacodec")]
+-    h265_media_codec: MediaCodecDecoder,
++    h265_media_codec: Option<MediaCodecDecoder>,
+     format: CodecFormat,
+     valid: bool,
+     #[cfg(feature = "hwcodec")]
+@@ -472,18 +472,18 @@ impl Decoder {
+         }
+         #[cfg(feature = "mediacodec")]
+         if enable_hwcodec_option() {
+-            decoding.ability_h264 =
+-                if H264_DECODER_SUPPORT.load(std::sync::atomic::Ordering::SeqCst) {
+-                    1
+-                } else {
+-                    0
+-                };
+-            decoding.ability_h265 =
+-                if H265_DECODER_SUPPORT.load(std::sync::atomic::Ordering::SeqCst) {
+-                    1
+-                } else {
+-                    0
+-                };
++            let h264 = crate::mediacodec::decoder_name(CodecFormat::H264).is_some();
++            let h265 = crate::mediacodec::decoder_name(CodecFormat::H265).is_some();
++            if h264 {
++                decoding.ability_h264 = 1;
++                // hardware H.264 decoders return frames with less delay than H.265 ones
++                if prefer == PreferCodec::Auto {
++                    decoding.prefer = PreferCodec::H264.into();
++                }
++            }
++            if h265 {
++                decoding.ability_h265 = 1;
++            }
+         }
+         for unsupported in mark_unsupported {
+             match unsupported {
+@@ -544,6 +544,11 @@ impl Decoder {
+                     }
+                     valid = h264_vram.is_some();
+                 }
++                #[cfg(feature = "mediacodec")]
++                if !valid && enable_hwcodec_option() {
++                    h264_media_codec = MediaCodecDecoder::new(format);
++                    valid = h264_media_codec.is_some();
++                }
+                 #[cfg(feature = "hwcodec")]
+                 if !valid {
+                     match HwRamDecoder::new(format) {
+@@ -552,14 +557,6 @@ impl Decoder {
+                     }
+                     valid = h264_ram.is_some();
+                 }
+-                #[cfg(feature = "mediacodec")]
+-                if !valid && enable_hwcodec_option() {
+-                    h264_media_codec = MediaCodecDecoder::new(format);
+-                    if h264_media_codec.is_none() {
+-                        log::error!("create H264 media codec decoder failed");
+-                    }
+-                    valid = h264_media_codec.is_some();
+-                }
+             }
+             CodecFormat::H265 => {
+                 #[cfg(feature = "vram")]
+@@ -570,6 +567,11 @@ impl Decoder {
+                     }
+                     valid = h265_vram.is_some();
+                 }
++                #[cfg(feature = "mediacodec")]
++                if !valid && enable_hwcodec_option() {
++                    h265_media_codec = MediaCodecDecoder::new(format);
++                    valid = h265_media_codec.is_some();
++                }
+                 #[cfg(feature = "hwcodec")]
+                 if !valid {
+                     match HwRamDecoder::new(format) {
+@@ -578,14 +580,6 @@ impl Decoder {
+                     }
+                     valid = h265_ram.is_some();
+                 }
+-                #[cfg(feature = "mediacodec")]
+-                if !valid && enable_hwcodec_option() {
+-                    h265_media_codec = MediaCodecDecoder::new(format);
+-                    if h265_media_codec.is_none() {
+-                        log::error!("create H265 media codec decoder failed");
+-                    }
+-                    valid = h265_media_codec.is_some();
+-                }
+             }
+             CodecFormat::Unknown => {
+                 log::error!("unknown codec format, cannot create decoder");
+@@ -661,6 +655,30 @@ impl Decoder {
+             #[cfg(any(feature = "hwcodec", feature = "vram"))]
+             video_frame::Union::H264s(h264s) => {
+                 *chroma = Some(Chroma::I420);
++                #[cfg(feature = "mediacodec")]
++                if let Some(decoder) = &mut self.h264_media_codec {
++                    match Decoder::handle_mediacodec_video_frame(decoder, h264s, rgb) {
++                        Err(e) => {
++                            crate::mediacodec::alog(
++                                true,
++                                &format!("{} failed, using software decoding: {e}", decoder.name()),
++                            );
++                            self.h264_media_codec = None;
++                            #[cfg(feature = "hwcodec")]
++                            if self.h264_ram.is_none() {
++                                self.h264_ram = HwRamDecoder::new(CodecFormat::H264).ok();
++                            }
++                            return Err(e);
++                        }
++                        ok => {
++                            if decoder.renders_to_surface() {
++                                // the frame is already on the texture, there is no rgba
++                                *_pixelbuffer = false;
++                            }
++                            return ok;
++                        }
++                    }
++                }
+                 #[cfg(feature = "vram")]
+                 if let Some(decoder) = &mut self.h264_vram {
+                     *_pixelbuffer = false;
+@@ -675,6 +693,30 @@ impl Decoder {
+             #[cfg(any(feature = "hwcodec", feature = "vram"))]
+             video_frame::Union::H265s(h265s) => {
+                 *chroma = Some(Chroma::I420);
++                #[cfg(feature = "mediacodec")]
++                if let Some(decoder) = &mut self.h265_media_codec {
++                    match Decoder::handle_mediacodec_video_frame(decoder, h265s, rgb) {
++                        Err(e) => {
++                            crate::mediacodec::alog(
++                                true,
++                                &format!("{} failed, using software decoding: {e}", decoder.name()),
++                            );
++                            self.h265_media_codec = None;
++                            #[cfg(feature = "hwcodec")]
++                            if self.h265_ram.is_none() {
++                                self.h265_ram = HwRamDecoder::new(CodecFormat::H265).ok();
++                            }
++                            return Err(e);
++                        }
++                        ok => {
++                            if decoder.renders_to_surface() {
++                                // the frame is already on the texture, there is no rgba
++                                *_pixelbuffer = false;
++                            }
++                            return ok;
++                        }
++                    }
++                }
+                 #[cfg(feature = "vram")]
+                 if let Some(decoder) = &mut self.h265_vram {
+                     *_pixelbuffer = false;
+@@ -686,24 +728,6 @@ impl Decoder {
+                 }
+                 Err(anyhow!("don't support h265!"))
+             }
+-            #[cfg(feature = "mediacodec")]
+-            video_frame::Union::H264s(h264s) => {
+-                *chroma = Some(Chroma::I420);
+-                if let Some(decoder) = &mut self.h264_media_codec {
+-                    Decoder::handle_mediacodec_video_frame(decoder, h264s, rgb)
+-                } else {
+-                    Err(anyhow!("don't support h264!"))
+-                }
+-            }
+-            #[cfg(feature = "mediacodec")]
+-            video_frame::Union::H265s(h265s) => {
+-                *chroma = Some(Chroma::I420);
+-                if let Some(decoder) = &mut self.h265_media_codec {
+-                    Decoder::handle_mediacodec_video_frame(decoder, h265s, rgb)
+-                } else {
+-                    Err(anyhow!("don't support h265!"))
+-                }
+-            }
+             _ => Err(anyhow!("unsupported video frame type!")),
+         }
+     }
+@@ -810,10 +834,10 @@ impl Decoder {
+         rgb: &mut ImageRgb,
+     ) -> ResultType<bool> {
+         let mut ret = false;
+-        for h264 in frames.frames.iter() {
+-            return decoder.decode(&h264.data, rgb);
++        for frame in frames.frames.iter() {
++            ret |= decoder.decode(frame, rgb)?;
+         }
+-        return Ok(false);
++        Ok(ret)
+     }
+ 
+     fn preference(id: Option<&str>) -> (PreferCodec, Chroma) {
+diff --git a/libs/scrap/src/common/mediacodec.rs b/libs/scrap/src/common/mediacodec.rs
+index 8ec5e6b..076607c 100644
+--- a/libs/scrap/src/common/mediacodec.rs
++++ b/libs/scrap/src/common/mediacodec.rs
+@@ -1,171 +1,748 @@
+-use hbb_common::{anyhow::Error, bail, log, ResultType};
+-use ndk::media::media_codec::{MediaCodec, MediaCodecDirection, MediaFormat};
+-use std::ops::Deref;
++//! H.264/H.265 decoding with the Android MediaCodec hardware decoders.
++//!
++//! When the app has handed over the Surface of the Flutter texture the remote
++//! screen is shown on (FFI.setVideoSurface), the decoder renders into it
++//! directly: no colour conversion and no copies, the GPU draws the frame.
++//! A render thread takes the decoded frames and shows them, so the video
++//! thread only queues input and never waits for the decoder.
++//! Otherwise (or for a second decoder) it runs in ByteBuffer mode and the
++//! decoded NV12 frame is converted to RGB with libyuv, like the software path.
++//!
++//! Notes from testing on an Amlogic S905L2 TV box (Android 9, OMX.amlogic.*):
++//! - only NV12 (color-format 21) output is offered, I420 (19) is not;
++//! - configuring 0x0 makes the HEVC decoder allocate 4096x2304 buffers, so
++//!   the real size is taken from the SPS of the key frame;
++//! - the output format always reports the configured size (a bigger stream
++//!   is scaled down); the client draws frames at the remote display size, so
++//!   the decoder is configured with exactly that size;
++//! - "vendor.low-latency.enable" makes the H.264 decoder return every frame at
++//!   once instead of holding the last one;
++//! - frames with several slices make the H.264 decoder stall, so a stall is
++//!   reported as an error and the caller falls back to the software decoder.
++use crate::{convert::*, CodecFormat, ImageFormat, ImageRgb};
++use hbb_common::{bail, log, message_proto::EncodedVideoFrame, ResultType};
++use ndk::media::{
++    media_codec::{MediaCodec, MediaCodecDirection, MediaFormat},
++    NdkMediaError,
++};
++use jni::{
++    objects::{JClass, JObject},
++    JNIEnv,
++};
++use ndk::native_window::NativeWindow;
+ use std::{
+-    io::Write,
+-    sync::atomic::{AtomicBool, Ordering},
+-    time::Duration,
++    ffi::c_void,
++    ops::Deref,
++    ptr::NonNull,
++    sync::{
++        atomic::{AtomicBool, AtomicUsize, Ordering},
++        Arc, Mutex,
++    },
++    thread::JoinHandle,
++    time::{Duration, Instant},
+ };
+ 
+-use crate::ImageFormat;
+-use crate::{
+-    codec::{EncoderApi, EncoderCfg},
+-    CodecFormat, I420ToABGR, I420ToARGB, ImageRgb,
+-};
++crate::generate_call_macro!(call_yuv, false);
+ 
+-/// MediaCodec mime type name
+ const H264_MIME_TYPE: &str = "video/avc";
+ const H265_MIME_TYPE: &str = "video/hevc";
+-// const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
+-// const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
++const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
++const INFO_OUTPUT_FORMAT_CHANGED: i32 = -2;
++const INFO_OUTPUT_BUFFERS_CHANGED: i32 = -3;
++// frames queued without any output before the decoder is considered stuck
++const MAX_PENDING: usize = 3;
++// the first frame takes longer; the client gives up on a codec whose first frame fails
++// (used for both the first input buffer and the first output)
++const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_millis(1000);
++const OUTPUT_TIMEOUT: Duration = Duration::from_millis(100);
++// surface mode: frames waiting for the render thread before a decoder that has not
++// shown anything for FIRST_OUTPUT_TIMEOUT is considered stuck
++const MAX_PENDING_RENDER: usize = 8;
+ 
+-// TODO MediaCodecEncoder
++// The video thread queues input while the render thread takes output, which
++// AMediaCodec supports.
++struct SharedCodec(MediaCodec);
++unsafe impl Send for SharedCodec {}
++unsafe impl Sync for SharedCodec {}
+ 
+-pub static H264_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
+-pub static H265_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
++impl Deref for SharedCodec {
++    type Target = MediaCodec;
+ 
+-pub struct MediaCodecDecoder {
+-    decoder: MediaCodec,
+-    name: String,
++    fn deref(&self) -> &MediaCodec {
++        &self.0
++    }
+ }
+ 
+-impl Deref for MediaCodecDecoder {
+-    type Target = MediaCodec;
++#[derive(Default)]
++struct RenderState {
++    // frames taken from the decoder (shown or skipped for a newer one)
++    rendered: AtomicUsize,
++    stop: AtomicBool,
++    error: Mutex<Option<String>>,
++}
+ 
+-    fn deref(&self) -> &Self::Target {
+-        &self.decoder
++#[link(name = "log")]
++extern "C" {
++    fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
++}
++
++/// Logs to logcat too: on Android the RustDesk log file is often not created.
++pub fn alog(error: bool, msg: &str) {
++    if error {
++        log::error!("{msg}");
++    } else {
++        log::info!("{msg}");
++    }
++    if let Ok(text) = std::ffi::CString::new(msg) {
++        let prio = if error { 6 } else { 4 };
++        unsafe { __android_log_write(prio, b"rustdesk-mc\0".as_ptr() as _, text.as_ptr()) };
+     }
+ }
+ 
++// Surface of the Flutter texture; one decoder at a time may render into it.
++struct SurfaceSlot {
++    window: Option<NativeWindow>,
++    generation: u64,
++    in_use: bool,
++}
++
++static SURFACE: Mutex<SurfaceSlot> = Mutex::new(SurfaceSlot {
++    window: None,
++    generation: 0,
++    in_use: false,
++});
++
++extern "C" {
++    fn ANativeWindow_fromSurface(env: *mut jni::sys::JNIEnv, surface: jni::sys::jobject)
++        -> *mut c_void;
++}
++
++#[no_mangle]
++pub extern "system" fn Java_ffi_FFI_setVideoSurface(env: JNIEnv, _class: JClass, surface: JObject) {
++    let window = if surface.is_null() {
++        None
++    } else {
++        let ptr = unsafe { ANativeWindow_fromSurface(env.get_raw(), surface.as_raw()) };
++        // fromSurface returns an acquired reference, NativeWindow releases it on drop
++        NonNull::new(ptr).map(|p| unsafe { NativeWindow::from_ptr(p.cast()) })
++    };
++    let mut slot = SURFACE.lock().unwrap();
++    alog(false, &format!("video surface: {}", window.is_some()));
++    slot.window = window;
++    slot.generation += 1;
++    slot.in_use = false;
++}
++
++fn claim_surface() -> Option<(NativeWindow, u64)> {
++    let mut slot = SURFACE.lock().unwrap();
++    if slot.in_use {
++        return None;
++    }
++    let window = slot.window.clone()?;
++    slot.in_use = true;
++    Some((window, slot.generation))
++}
++
++fn release_surface(generation: u64) {
++    let mut slot = SURFACE.lock().unwrap();
++    if slot.generation == generation {
++        slot.in_use = false;
++    }
++}
++
++fn mime_type(format: CodecFormat) -> Option<&'static str> {
++    match format {
++        CodecFormat::H264 => Some(H264_MIME_TYPE),
++        CodecFormat::H265 => Some(H265_MIME_TYPE),
++        _ => None,
++    }
++}
++
++/// Name of a hardware decoder with NV12 ByteBuffer output for the format.
++pub fn decoder_name(format: CodecFormat) -> Option<String> {
++    let mime = mime_type(format)?;
++    let info = crate::android::ffi::get_codec_info()?;
++    info.codecs
++        .iter()
++        .find(|c| {
++            !c.is_encoder
++                && c.hw == Some(true)
++                && c.nv12
++                && c.mime_type == mime
++                && !c.name.ends_with(".secure")
++        })
++        .map(|c| c.name.clone())
++}
++
++pub struct MediaCodecDecoder {
++    name: String,
++    format: CodecFormat,
++    codec: Option<Arc<SharedCodec>>,
++    // the texture surface while the decoder renders into it, and its render thread
++    surface: Option<(NativeWindow, u64)>,
++    render: Option<(Arc<RenderState>, JoinHandle<()>)>,
++    queued: usize,
++    last_rendered: usize,
++    last_progress: Instant,
++    // size of the stream (from the SPS) and the size of the decoded picture
++    stream_size: (usize, usize),
++    size: (usize, usize),
++    stride: usize,
++    slice_height: usize,
++    pending: usize,
++    got_output: bool,
++    pts: u64,
++}
++
+ impl MediaCodecDecoder {
+     pub fn new(format: CodecFormat) -> Option<MediaCodecDecoder> {
+-        match format {
+-            CodecFormat::H264 => create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder),
+-            CodecFormat::H265 => create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder),
+-            _ => {
+-                log::error!("Unsupported codec format: {}", format);
+-                None
++        let name = decoder_name(format)?;
++        alog(false, &format!("mediacodec decoder for {format:?}: {name}"));
++        Some(MediaCodecDecoder {
++            name,
++            format,
++            codec: None,
++            surface: None,
++            render: None,
++            queued: 0,
++            last_rendered: 0,
++            last_progress: Instant::now(),
++            stream_size: (0, 0),
++            size: (0, 0),
++            stride: 0,
++            slice_height: 0,
++            pending: 0,
++            got_output: false,
++            pts: 0,
++        })
++    }
++
++    pub fn name(&self) -> &str {
++        &self.name
++    }
++
++    /// Frames go straight to the texture surface, not to the ImageRgb.
++    pub fn renders_to_surface(&self) -> bool {
++        self.codec.is_some() && self.surface.is_some()
++    }
++
++    fn new_codec(&self) -> ResultType<MediaCodec> {
++        match MediaCodec::from_codec_name(&self.name) {
++            Some(codec) => Ok(codec),
++            None => bail!("failed to create {}", self.name),
++        }
++    }
++
++    fn configure(&self, codec: &MediaCodec, w: usize, h: usize, surface: bool) -> ResultType<()> {
++        let mime = mime_type(self.format).unwrap_or_default();
++        let fmt = MediaFormat::new();
++        fmt.set_str("mime", mime);
++        fmt.set_i32("width", w as _);
++        fmt.set_i32("height", h as _);
++        if !surface {
++            fmt.set_i32("color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
++        }
++        fmt.set_i32("low-latency", 1);
++        fmt.set_i32("vendor.low-latency.enable", 1);
++        let window = if surface {
++            self.surface.as_ref().map(|(w, _)| w)
++        } else {
++            None
++        };
++        if let Err(e) = codec.configure(&fmt, window, MediaCodecDirection::Decoder) {
++            bail!("failed to configure {}: {e:?}", self.name);
++        }
++        if let Err(e) = codec.start() {
++            bail!("failed to start {}: {e:?}", self.name);
++        }
++        Ok(())
++    }
++
++    fn stop_codec(&mut self) {
++        if let Some((state, thread)) = self.render.take() {
++            state.stop.store(true, Ordering::Relaxed);
++            thread.join().ok();
++        }
++        if let Some(codec) = self.codec.take() {
++            codec.stop().ok();
++        }
++    }
++
++    fn start_render_thread(&mut self) {
++        let Some(codec) = self.codec.clone() else {
++            return;
++        };
++        let state = Arc::new(RenderState::default());
++        let st = state.clone();
++        let name = self.name.clone();
++        let thread = std::thread::spawn(move || {
++            while !st.stop.load(Ordering::Relaxed) {
++                match codec.dequeue_output_buffer(Duration::from_millis(50)) {
++                    Ok(Some(mut output)) => {
++                        // show only the newest of the frames that are ready
++                        let mut dropped = Ok(());
++                        while let Ok(Some(next)) = codec.dequeue_output_buffer(Duration::ZERO) {
++                            dropped = codec.release_output_buffer(output, false);
++                            st.rendered.fetch_add(1, Ordering::Relaxed);
++                            output = next;
++                        }
++                        if let Err(e) = dropped.and_then(|_| codec.release_output_buffer(output, true)) {
++                            *st.error.lock().unwrap() = Some(format!("{name}: render: {e:?}"));
++                            break;
++                        }
++                        st.rendered.fetch_add(1, Ordering::Relaxed);
++                    }
++                    Ok(None) => {}
++                    Err(NdkMediaError::UnknownResult(s))
++                        if s.0 == INFO_OUTPUT_FORMAT_CHANGED
++                            || s.0 == INFO_OUTPUT_BUFFERS_CHANGED => {}
++                    Err(e) => {
++                        *st.error.lock().unwrap() = Some(format!("{name}: dequeue output: {e:?}"));
++                        break;
++                    }
++                }
++            }
++        });
++        self.render = Some((state, thread));
++        self.queued = 0;
++        self.last_rendered = 0;
++        self.last_progress = Instant::now();
++    }
++
++    fn create(&mut self, w: usize, h: usize) -> ResultType<()> {
++        self.stop_codec();
++        if self.surface.is_none() {
++            self.surface = claim_surface();
++        }
++        let surface = self.surface.is_some();
++        let codec = self.new_codec()?;
++        let codec = match self.configure(&codec, w, h, surface) {
++            Ok(()) => codec,
++            Err(e) if surface => {
++                alog(true, &format!("{e}, decoding without the surface"));
++                self.drop_surface();
++                // a codec that failed to configure is not reused
++                drop(codec);
++                let codec = self.new_codec()?;
++                self.configure(&codec, w, h, false)?;
++                codec
+             }
++            Err(e) => return Err(e),
++        };
++        alog(
++            false,
++            &format!(
++                "mediacodec {} started, {w}x{h}, surface: {}",
++                self.name,
++                self.surface.is_some()
++            ),
++        );
++        self.codec = Some(Arc::new(SharedCodec(codec)));
++        if self.surface.is_some() {
++            self.start_render_thread();
+         }
++        self.stream_size = (w, h);
++        self.size = (w, h);
++        self.stride = w;
++        self.slice_height = h;
++        self.pending = 0;
++        self.got_output = false;
++        Ok(())
+     }
+ 
+     // rgb [in/out] fmt and stride must be set in ImageRgb
+-    pub fn decode(&mut self, data: &[u8], rgb: &mut ImageRgb) -> ResultType<bool> {
+-        // take dst_stride into account please
+-        let dst_stride = rgb.stride();
+-        match self.dequeue_input_buffer(Duration::from_millis(10))? {
+-            Some(mut input_buffer) => {
+-                let mut buf = input_buffer.buffer_mut();
+-                if data.len() > buf.len() {
+-                    log::error!("Failed to decode, the input data size is bigger than input buf");
+-                    bail!("The input data size is bigger than input buf");
++    pub fn decode(&mut self, frame: &EncodedVideoFrame, rgb: &mut ImageRgb) -> ResultType<bool> {
++        let data = &frame.data[..];
++        if frame.key {
++            if let Some((w, h)) = sps_size(self.format, data) {
++                if self.codec.is_none() || self.stream_size != (w, h) {
++                    self.create(w, h)?;
+                 }
+-                buf.write_all(&data)?;
+-                self.queue_input_buffer(input_buffer, 0, data.len(), 0, 0)?;
+             }
+-            None => {
+-                log::debug!("Failed to dequeue_input_buffer: No available input_buffer");
++        }
++        if self.codec.is_none() {
++            // wait for a key frame with the parameter sets
++            alog(true, &format!("{}: no decoder yet, key: {}", self.name, frame.key));
++            return Ok(false);
++        }
++        self.queue(data)?;
++        if let Some((state, _)) = &self.render {
++            // the render thread shows the frame as soon as the decoder returns it
++            self.queued += 1;
++            if let Some(e) = state.error.lock().unwrap().take() {
++                bail!(e);
++            }
++            let rendered = state.rendered.load(Ordering::Relaxed);
++            self.got_output = rendered > 0;
++            if rendered != self.last_rendered || self.queued <= rendered + 1 {
++                self.last_rendered = rendered;
++                self.last_progress = Instant::now();
++            } else if self.queued - rendered >= MAX_PENDING_RENDER
++                && self.last_progress.elapsed() > FIRST_OUTPUT_TIMEOUT
++            {
++                bail!(
++                    "{} returns no frames, {} pending",
++                    self.name,
++                    self.queued - rendered
++                );
+             }
++            return Ok(true);
++        }
++        self.pending += 1;
++        let got = self.receive(rgb)?;
++        if !got && self.pending >= MAX_PENDING {
++            bail!("{} returns no frames, {} pending", self.name, self.pending);
++        }
++        self.got_output |= got;
++        Ok(got)
++    }
++
++    fn queue(&mut self, data: &[u8]) -> ResultType<()> {
++        let codec = self.codec.as_ref().unwrap();
++        // right after start (surface mode: while it allocates the output buffers) the
++        // decoder may need a while to hand out its first input buffer
++        let timeout = if self.got_output {
++            OUTPUT_TIMEOUT
++        } else {
++            FIRST_OUTPUT_TIMEOUT
+         };
++        let Some(mut input) = codec.dequeue_input_buffer(timeout)? else {
++            bail!("{}: no input buffer", self.name);
++        };
++        let buf = input.buffer_mut();
++        if data.len() > buf.len() {
++            bail!(
++                "{}: frame of {} bytes > input buffer {}",
++                self.name,
++                data.len(),
++                buf.len()
++            );
++        }
++        buf[..data.len()].copy_from_slice(data);
++        self.pts += 33_333;
++        codec.queue_input_buffer(input, 0, data.len(), self.pts, 0)?;
++        Ok(())
++    }
+ 
+-        return match self.dequeue_output_buffer(Duration::from_millis(100))? {
+-            Some(output_buffer) => {
+-                let res_format = self.output_format();
+-                let w = res_format
+-                    .i32("width")
+-                    .ok_or(Error::msg("Failed to dequeue_output_buffer, width is None"))?
+-                    as usize;
+-                let h = res_format.i32("height").ok_or(Error::msg(
+-                    "Failed to dequeue_output_buffer, height is None",
+-                ))? as usize;
+-                let stride = res_format.i32("stride").ok_or(Error::msg(
+-                    "Failed to dequeue_output_buffer, stride is None",
+-                ))?;
+-                let buf = output_buffer.buffer();
+-                let bps = 4;
+-                let u = buf.len() * 2 / 3;
+-                let v = buf.len() * 5 / 6;
+-                rgb.raw.resize(h * w * bps, 0);
+-                let y_ptr = buf.as_ptr();
+-                let u_ptr = buf[u..].as_ptr();
+-                let v_ptr = buf[v..].as_ptr();
+-                unsafe {
+-                    match rgb.fmt() {
+-                        ImageFormat::ARGB => {
+-                            I420ToARGB(
+-                                y_ptr,
+-                                stride,
+-                                u_ptr,
+-                                stride / 2,
+-                                v_ptr,
+-                                stride / 2,
+-                                rgb.raw.as_mut_ptr(),
+-                                (w * bps) as _,
+-                                w as _,
+-                                h as _,
+-                            );
++    // ByteBuffer mode: wait for the first output, then take whatever else is ready;
++    // only the newest frame is converted.
++    fn receive(&mut self, rgb: &mut ImageRgb) -> ResultType<bool> {
++        let mut got = false;
++        let mut timeout = if self.got_output {
++            OUTPUT_TIMEOUT
++        } else {
++            FIRST_OUTPUT_TIMEOUT
++        };
++        loop {
++            let codec = self.codec.as_ref().unwrap();
++            match codec.dequeue_output_buffer(timeout) {
++                Ok(Some(output)) => {
++                    self.pending = self.pending.saturating_sub(1);
++                    timeout = Duration::ZERO;
++                    let newest = match codec.dequeue_output_buffer(Duration::ZERO) {
++                        Ok(Some(next)) => {
++                            codec.release_output_buffer(output, false)?;
++                            self.pending = self.pending.saturating_sub(1);
++                            next
+                         }
+-                        ImageFormat::ARGB => {
+-                            I420ToABGR(
+-                                y_ptr,
+-                                stride,
+-                                u_ptr,
+-                                stride / 2,
+-                                v_ptr,
+-                                stride / 2,
+-                                rgb.raw.as_mut_ptr(),
+-                                (w * bps) as _,
+-                                w as _,
+-                                h as _,
+-                            );
++                        _ => output,
++                    };
++                    let res = self.to_rgb(newest.buffer(), rgb);
++                    codec.release_output_buffer(newest, false)?;
++                    res?;
++                    got = true;
++                }
++                Ok(None) => return Ok(got),
++                Err(NdkMediaError::UnknownResult(s)) if s.0 == INFO_OUTPUT_FORMAT_CHANGED => {
++                    let f = codec.output_format();
++                    let (w, h) = self.size;
++                    let (fw, fh) = match (f.i32("crop-right"), f.i32("crop-bottom")) {
++                        (Some(r), Some(b)) => (
++                            r - f.i32("crop-left").unwrap_or(0) + 1,
++                            b - f.i32("crop-top").unwrap_or(0) + 1,
++                        ),
++                        _ => (
++                            f.i32("width").unwrap_or(w as _),
++                            f.i32("height").unwrap_or(h as _),
++                        ),
++                    };
++                    self.size = (fw as _, fh as _);
++                    self.stride = f.i32("stride").unwrap_or(fw) as _;
++                    self.slice_height = f.i32("slice-height").unwrap_or(fh) as _;
++                    log::info!(
++                        "mediacodec output format: {}, using {}x{} stride {} slice-height {}",
++                        f,
++                        fw,
++                        fh,
++                        self.stride,
++                        self.slice_height
++                    );
++                }
++                Err(NdkMediaError::UnknownResult(s)) if s.0 == INFO_OUTPUT_BUFFERS_CHANGED => {}
++                Err(e) => bail!("{}: dequeue output failed: {e:?}", self.name),
++            }
++        }
++    }
++
++    fn to_rgb(&self, buf: &[u8], rgb: &mut ImageRgb) -> ResultType<()> {
++        let (w, h) = self.size;
++        let (stride, slice_height) = (self.stride.max(w), self.slice_height.max(h));
++        let uv_offset = stride * slice_height;
++        if buf.len() < uv_offset + stride * (h / 2) {
++            bail!(
++                "{}: output buffer of {} bytes is too small for {w}x{h} stride {stride}",
++                self.name,
++                buf.len()
++            );
++        }
++        rgb.w = w;
++        rgb.h = h;
++        let dst_align = rgb.align();
++        let bytes_per_row = (w * 4 + dst_align - 1) & !(dst_align - 1);
++        rgb.raw.resize(h * bytes_per_row, 0);
++        let f = match rgb.fmt() {
++            ImageFormat::ARGB => NV12ToARGB,
++            ImageFormat::ABGR => NV12ToABGR,
++            fmt => bail!("unsupported image format: {fmt:?}"),
++        };
++        call_yuv!(f(
++            buf.as_ptr(),
++            stride as _,
++            buf[uv_offset..].as_ptr(),
++            stride as _,
++            rgb.raw.as_mut_ptr(),
++            bytes_per_row as _,
++            w as _,
++            h as _,
++        ));
++        Ok(())
++    }
++}
++
++impl MediaCodecDecoder {
++    fn drop_surface(&mut self) {
++        if let Some((_, generation)) = self.surface.take() {
++            release_surface(generation);
++        }
++    }
++}
++
++impl Drop for MediaCodecDecoder {
++    fn drop(&mut self) {
++        self.stop_codec();
++        self.drop_surface();
++    }
++}
++
++// ---- SPS parsing: just enough to get the picture size ----
++
++struct BitReader {
++    data: Vec<u8>,
++    pos: usize,
++}
++
++impl BitReader {
++    // payload of a NAL unit without the emulation prevention bytes
++    fn new(nal: &[u8]) -> Self {
++        let mut data = Vec::with_capacity(nal.len());
++        let mut zeros = 0;
++        for &b in nal {
++            if zeros >= 2 && b == 3 {
++                zeros = 0;
++                continue;
++            }
++            zeros = if b == 0 { zeros + 1 } else { 0 };
++            data.push(b);
++        }
++        BitReader { data, pos: 0 }
++    }
++
++    fn u(&mut self, n: usize) -> Option<u32> {
++        let mut v = 0u32;
++        for _ in 0..n {
++            let byte = *self.data.get(self.pos / 8)?;
++            v = (v << 1) | ((byte >> (7 - self.pos % 8)) & 1) as u32;
++            self.pos += 1;
++        }
++        Some(v)
++    }
++
++    fn skip(&mut self, n: usize) -> Option<()> {
++        self.pos += n;
++        (self.pos <= self.data.len() * 8).then_some(())
++    }
++
++    fn ue(&mut self) -> Option<u32> {
++        let mut zeros = 0;
++        while self.u(1)? == 0 {
++            zeros += 1;
++            if zeros > 31 {
++                return None;
++            }
++        }
++        Some((1u32 << zeros) - 1 + self.u(zeros)?)
++    }
++
++    fn se(&mut self) -> Option<i32> {
++        let v = self.ue()?;
++        Some(if v & 1 == 1 {
++            (v as i32 + 1) / 2
++        } else {
++            -(v as i32 / 2)
++        })
++    }
++}
++
++// NAL units of an Annex-B byte stream
++fn nal_units(data: &[u8]) -> Vec<&[u8]> {
++    let mut starts = vec![];
++    let mut i = 0;
++    while i + 3 <= data.len() {
++        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
++            starts.push(i + 3);
++            i += 3;
++        } else {
++            i += 1;
++        }
++    }
++    let mut nals = vec![];
++    for (n, &s) in starts.iter().enumerate() {
++        let mut e = starts.get(n + 1).map_or(data.len(), |&next| next - 3);
++        while e > s && data[e - 1] == 0 {
++            e -= 1;
++        }
++        if s < e {
++            nals.push(&data[s..e]);
++        }
++    }
++    nals
++}
++
++fn sps_size(format: CodecFormat, data: &[u8]) -> Option<(usize, usize)> {
++    for nal in nal_units(data) {
++        match format {
++            CodecFormat::H264 if nal[0] & 0x1f == 7 => return h264_sps_size(&nal[1..]),
++            CodecFormat::H265 if nal.len() > 2 && (nal[0] >> 1) & 0x3f == 33 => {
++                return h265_sps_size(&nal[2..])
++            }
++            _ => {}
++        }
++    }
++    None
++}
++
++fn h264_sps_size(sps: &[u8]) -> Option<(usize, usize)> {
++    let mut r = BitReader::new(sps);
++    let profile_idc = r.u(8)?;
++    r.skip(16)?; // constraint flags, level_idc
++    r.ue()?; // seq_parameter_set_id
++    let mut chroma_format_idc = 1;
++    if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(&profile_idc) {
++        chroma_format_idc = r.ue()?;
++        if chroma_format_idc == 3 {
++            r.skip(1)?; // separate_colour_plane_flag
++        }
++        r.ue()?; // bit_depth_luma_minus8
++        r.ue()?; // bit_depth_chroma_minus8
++        r.skip(1)?; // qpprime_y_zero_transform_bypass_flag
++        if r.u(1)? == 1 {
++            // seq_scaling_matrix_present_flag
++            let count = if chroma_format_idc != 3 { 8 } else { 12 };
++            for i in 0..count {
++                if r.u(1)? == 1 {
++                    let size = if i < 6 { 16 } else { 64 };
++                    let (mut last, mut next) = (8i32, 8i32);
++                    for _ in 0..size {
++                        if next != 0 {
++                            next = (last + r.se()? + 256) % 256;
+                         }
+-                        _ => {
+-                            bail!("Unsupported image format");
++                        if next != 0 {
++                            last = next;
+                         }
+                     }
+                 }
+-                self.release_output_buffer(output_buffer, false)?;
+-                Ok(true)
+             }
+-            None => {
+-                log::debug!("Failed to dequeue_output: No available dequeue_output");
+-                Ok(false)
++        }
++    }
++    r.ue()?; // log2_max_frame_num_minus4
++    match r.ue()? {
++        0 => {
++            r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
++        }
++        1 => {
++            r.skip(1)?;
++            r.se()?;
++            r.se()?;
++            for _ in 0..r.ue()? {
++                r.se()?;
+             }
++        }
++        _ => {}
++    }
++    r.ue()?; // max_num_ref_frames
++    r.skip(1)?; // gaps_in_frame_num_value_allowed_flag
++    let width_mbs = r.ue()? as usize + 1;
++    let height_map_units = r.ue()? as usize + 1;
++    let frame_mbs_only = r.u(1)? as usize;
++    if frame_mbs_only == 0 {
++        r.skip(1)?; // mb_adaptive_frame_field_flag
++    }
++    r.skip(1)?; // direct_8x8_inference_flag
++    let mut w = width_mbs * 16;
++    let mut h = (2 - frame_mbs_only) * height_map_units * 16;
++    if r.u(1)? == 1 {
++        let (crop_x, crop_y) = match chroma_format_idc {
++            1 => (2, 2 * (2 - frame_mbs_only)),
++            2 => (2, 2 - frame_mbs_only),
++            _ => (1, 2 - frame_mbs_only),
+         };
++        let (left, right) = (r.ue()? as usize, r.ue()? as usize);
++        let (top, bottom) = (r.ue()? as usize, r.ue()? as usize);
++        w = w.checked_sub(crop_x * (left + right))?;
++        h = h.checked_sub(crop_y * (top + bottom))?;
+     }
++    (w > 0 && h > 0).then_some((w, h))
+ }
+ 
+-fn create_media_codec(name: &str, direction: MediaCodecDirection) -> Option<MediaCodecDecoder> {
+-    let codec = MediaCodec::from_decoder_type(name)?;
+-    let media_format = MediaFormat::new();
+-    media_format.set_str("mime", name);
+-    media_format.set_i32("width", 0);
+-    media_format.set_i32("height", 0);
+-    media_format.set_i32("color-format", 19); // COLOR_FormatYUV420Planar
+-    if let Err(e) = codec.configure(&media_format, None, direction) {
+-        log::error!("Failed to init decoder: {:?}", e);
+-        return None;
+-    };
+-    log::error!("decoder init success");
+-    if let Err(e) = codec.start() {
+-        log::error!("Failed to start decoder: {:?}", e);
+-        return None;
+-    };
+-    log::debug!("Init decoder succeeded!: {:?}", name);
+-    return Some(MediaCodecDecoder {
+-        decoder: codec,
+-        name: name.to_owned(),
+-    });
+-}
+-
+-pub fn check_mediacodec() {
+-    std::thread::spawn(move || {
+-        // check decoders
+-        let decoders = MediaCodecDecoder::new_decoders();
+-        H264_DECODER_SUPPORT.swap(decoders.h264.is_some(), Ordering::SeqCst);
+-        H265_DECODER_SUPPORT.swap(decoders.h265.is_some(), Ordering::SeqCst);
+-        decoders.h264.map(|d| d.stop());
+-        decoders.h265.map(|d| d.stop());
+-        // TODO encoders
+-    });
++fn h265_sps_size(sps: &[u8]) -> Option<(usize, usize)> {
++    let mut r = BitReader::new(sps);
++    r.skip(4)?; // sps_video_parameter_set_id
++    let max_sub_layers_minus1 = r.u(3)? as usize;
++    r.skip(1)?; // sps_temporal_id_nesting_flag
++    r.skip(96)?; // general profile_tier_level
++    let mut sub_layer = vec![];
++    for _ in 0..max_sub_layers_minus1 {
++        sub_layer.push((r.u(1)?, r.u(1)?));
++    }
++    if max_sub_layers_minus1 > 0 {
++        r.skip(2 * (8 - max_sub_layers_minus1))?;
++    }
++    for (profile_present, level_present) in sub_layer {
++        if profile_present == 1 {
++            r.skip(88)?;
++        }
++        if level_present == 1 {
++            r.skip(8)?;
++        }
++    }
++    r.ue()?; // sps_seq_parameter_set_id
++    let chroma_format_idc = r.ue()?;
++    if chroma_format_idc == 3 {
++        r.skip(1)?; // separate_colour_plane_flag
++    }
++    let mut w = r.ue()? as usize;
++    let mut h = r.ue()? as usize;
++    if r.u(1)? == 1 {
++        let sub_w = if chroma_format_idc == 1 || chroma_format_idc == 2 {
++            2
++        } else {
++            1
++        };
++        let sub_h = if chroma_format_idc == 1 { 2 } else { 1 };
++        let (left, right) = (r.ue()? as usize, r.ue()? as usize);
++        let (top, bottom) = (r.ue()? as usize, r.ue()? as usize);
++        w = w.checked_sub(sub_w * (left + right))?;
++        h = h.checked_sub(sub_h * (top + bottom))?;
++    }
++    (w > 0 && h > 0).then_some((w, h))
+ }
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 0777443..6c1cf9e 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -61,8 +61,6 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
+         );
+         #[cfg(not(debug_assertions))]
+         hbb_common::init_log(false, "");
+-        #[cfg(feature = "mediacodec")]
+-        scrap::mediacodec::check_mediacodec();
+         crate::common::test_rendezvous_server();
+         crate::common::test_nat_type();
+     }
+-- 
+2.34.1
+

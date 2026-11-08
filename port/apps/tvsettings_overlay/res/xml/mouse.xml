@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SlimBOX 9.20 TvSettings res/xml/mouse.xml (slimBOXtv settings -> Mouse, renamed "Mouse and
+     keyboard" via the system_mouse string) with SlimBOX's hidden "mouse_touch_input" switch shown
+     again as "Remote desktop mode". MouseFragment stores it in persist.vendor.mouse_touch_input
+     (the only switch of this screen it saves; a switch with another key would not be stored),
+     which nothing else reads; the port applies it at once (/vendor/etc/init/rombica_a2.rc):
+     right mouse button = right click and keyboard "like on a PC" while on. An overlay cannot add
+     strings, so the title is a literal: English in xml/, Russian in xml-ru/. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    android:title="@com.android.tv.settings:string/system_mouse">
+    <SwitchPreference
+        android:persistent="true"
+        android:title="@com.android.tv.settings:string/accessibility_toggle_large_pointer_icon_title"
+        android:key="toggle_large_pointer_icon" />
+    <Preference
+        android:persistent="true"
+        android:title="@com.android.tv.settings:string/pointer_speed"
+        android:key="pointer_speed" />
+    <SwitchPreference
+        android:persistent="true"
+        android:title="Remote desktop mode"
+        android:summary="@com.android.tv.settings:string/mouse_touch_input_summary"
+        android:key="mouse_touch_input" />
+</PreferenceScreen>

@@ -1,0 +1,25 @@
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
+index d5f5bed..3d2228a 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
+@@ -117,12 +117,15 @@ int brcmf_sdiod_intr_register(struct brcmf_sdio_dev *sdiodev)
+ 		}
+ 		sdiodev->oob_irq_requested = true;
+ 
++		/* Only a probe of the wake capability: some SoCs (e.g. Amlogic
++		 * GXL/GXLX gpio-intc) cannot wake the system from a GPIO interrupt,
++		 * the interrupt itself still works.
++		 */
+ 		ret = enable_irq_wake(pdata->oob_irq_nr);
+-		if (ret != 0) {
+-			brcmf_err("enable_irq_wake failed %d\n", ret);
+-			return ret;
+-		}
+-		disable_irq_wake(pdata->oob_irq_nr);
++		if (ret != 0)
++			brcmf_info("OOB irq cannot wake the system (%d)\n", ret);
++		else
++			disable_irq_wake(pdata->oob_irq_nr);
+ 
+ 		sdio_claim_host(sdiodev->func1);
+ 

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Indicator</string>
+    <string name="hint">Front LED of Rombica SmartBox A2 while the box is on. It has two colours on one pin: when both colours are active, red is shown over blue. In standby the LED is red (set by the power firmware).</string>
+    <string name="blue">Blue</string>
+    <string name="red">Red</string>
+    <string-array name="roles">
+        <item>Off</item>
+        <item>On</item>
+        <item>Blinking (heartbeat)</item>
+        <item>Flashes on storage activity</item>
+        <item>Flashes on remote key press</item>
+    </string-array>
+    <string name="port_info">Rombica A2 port</string>
+    <string name="no_changelog">No changelog in /vendor/etc/rombica_port.</string>
+</resources>

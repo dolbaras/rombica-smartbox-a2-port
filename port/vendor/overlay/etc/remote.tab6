@@ -1,0 +1,51 @@
+# Rombica SmartBox A2 remote (cyxtech cs918, NEC customcode 0x4040) with mouse mode.
+# Loaded by the SlimBOX "remotecfg6" service (init.amlogic.board.rc). The key map is the one from
+# the stock DTB (custom_maps/cyxtech-remote-cs918); the Khadas kernel reads mouse-mode fields from
+# the DTB only for "khadas-ir", so they are given here.
+# fn_key_scancode: the mouse key (0x44) toggles mouse mode; in mouse mode the arrows move the
+# pointer (with acceleration) and OK is the left button. The stock key map has no 0x44 at all, and
+# the driver drops unknown scancodes before it checks the mode key, so 0x44 is added (as
+# KEY_SCROLLLOCK, which Android ignores).
+custom_name = cyxtech-remote-cs918
+custom_code = 0x4040
+release_delay = 80
+
+fn_key_scancode = 0x44
+cursor_left_scancode = 0x10
+cursor_right_scancode = 0x11
+cursor_up_scancode = 0x0b
+cursor_down_scancode = 0x0e
+cursor_ok_scancode = 0x0d
+
+key_begin
+	0x00 11
+	0x01 2
+	0x02 3
+	0x03 4
+	0x04 5
+	0x05 6
+	0x06 7
+	0x07 8
+	0x08 9
+	0x09 10
+	0x0c 14
+	0x0b 103
+	0x0e 108
+	0x10 105
+	0x11 106
+	0x0d 97
+	0x1e 122
+	0x1f 123
+	0x4d 116
+	0x1a 102
+	0x42 158
+	0x45 139
+	0x15 115
+	0x1c 114
+	0x43 113
+	0x57 70
+	0x44 70
+	0x5b 395
+	0x54 392
+	0x53 393
+key_end

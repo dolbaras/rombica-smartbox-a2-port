@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static resource overlay for TvSettings (SlimBOX build): replaces the main settings menu so the
+     Bluetooth entry (no Bluetooth on AP6181) becomes "Indicator" (front LED settings). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ru.rombica.tvsettings.overlay"
+    android:versionCode="1"
+    android:versionName="1.0">
+    <overlay android:targetPackage="com.android.tv.settings"
+        android:isStatic="true"
+        android:priority="10" />
+</manifest>

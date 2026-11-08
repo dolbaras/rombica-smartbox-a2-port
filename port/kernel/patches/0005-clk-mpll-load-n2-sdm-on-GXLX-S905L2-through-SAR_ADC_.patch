@@ -1,0 +1,95 @@
+From cde5cf34c29c08f062a4e37cbae111e33160c363 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:09 +0300
+Subject: [PATCH 5/7] clk: mpll: load n2/sdm on GXLX (S905L2) through
+ SAR_ADC_REG12
+
+On GXLX a new MPLL setting only takes effect after its load bit is set in
+SAR_ADC_REG12 (as in Amlogic's 3.14 kernel); otherwise the outputs stay at
+~248 MHz and audio played ~2x too fast.
+---
+ drivers/amlogic/clk/clk-mpll.c | 12 ++++++++++++
+ drivers/amlogic/clk/clkc.h     |  1 +
+ drivers/amlogic/clk/gxl/gxl.c  |  4 ++++
+ 3 files changed, 17 insertions(+)
+
+diff --git a/drivers/amlogic/clk/clk-mpll.c b/drivers/amlogic/clk/clk-mpll.c
+index 66bd8759..e7b3a887 100644
+--- a/drivers/amlogic/clk/clk-mpll.c
++++ b/drivers/amlogic/clk/clk-mpll.c
+@@ -24,8 +24,17 @@
+ 
+ #include <linux/clk-provider.h>
+ #include <linux/delay.h>
++#include <linux/amlogic/cpu_version.h>
++#include <linux/amlogic/iomap.h>
+ 
+ #include "clkc.h"
++
++/*
++ * GXLX (S905L2): a new n2/sdm setting only reaches the MPLL output after its load bit is set in
++ * SAR_ADC_REG12 (cbus 0x21ac); until then the outputs stay at their ~248 MHz boot rate (audio
++ * then ran ~2x too fast). Same as Amlogic's 3.14 kernel. The SAR ADC driver does not use REG12.
++ */
++#define SAR_ADC_REG12	0x21ac
+ /* #undef pr_debug */
+ /* #define pr_debug pr_info */
+ #define SDM_MAX 16384ULL
+@@ -143,6 +152,9 @@ static int mpll_set_rate(struct clk_hw *hw, unsigned long rate,
+ 				0x1<<14, mpll->base + p->reg_off - 0x3c);
+ 		#endif
+ 		writel(reg, mpll->base + p->reg_off);
++		if (mpll->gxlx_load && is_meson_gxlx_cpu())
++			aml_write_cbus(SAR_ADC_REG12, aml_read_cbus(SAR_ADC_REG12)
++				| (1 << (mpll->gxlx_load - 1)));
+ 		/* mpll top misc for cpu after txlx */
+ 		if (mpll->top_misc_reg)
+ 			writel(readl(mpll->base
+diff --git a/drivers/amlogic/clk/clkc.h b/drivers/amlogic/clk/clkc.h
+index b23fd61d..c05851ac 100644
+--- a/drivers/amlogic/clk/clkc.h
++++ b/drivers/amlogic/clk/clkc.h
+@@ -129,6 +129,7 @@ struct meson_clk_mpll {
+ 	u16 top_misc_reg; /*after txlx*/
+ 	u16 top_misc_bit;
+ 	u16 mpll_cntl0_reg;
++	u8 gxlx_load;	/* GXLX: 1 + bit in SAR_ADC_REG12 that loads n2/sdm, 0 = none */
+ 	spinlock_t *lock;
+ };
+ 
+diff --git a/drivers/amlogic/clk/gxl/gxl.c b/drivers/amlogic/clk/gxl/gxl.c
+index 643dd586..abc45547 100644
+--- a/drivers/amlogic/clk/gxl/gxl.c
++++ b/drivers/amlogic/clk/gxl/gxl.c
+@@ -422,6 +422,7 @@ static struct meson_clk_mpll gxl_mpll0 = {
+ 	},
+ 	.sdm_en = 15,
+ 	.en_dds = 14,
++	.gxlx_load = 1,
+ 	.lock = &clk_lock,
+ 	.hw.init = &(struct clk_init_data){
+ 		.name = "mpll0",
+@@ -444,6 +445,7 @@ static struct meson_clk_mpll gxl_mpll1 = {
+ 	},
+ 	.sdm_en = 15,
+ 	.en_dds = 14,
++	.gxlx_load = 2,
+ 	.lock = &clk_lock,
+ 	.hw.init = &(struct clk_init_data){
+ 		.name = "mpll1",
+@@ -466,6 +468,7 @@ static struct meson_clk_mpll gxl_mpll2 = {
+ 	},
+ 	.sdm_en = 15,
+ 	.en_dds = 14,
++	.gxlx_load = 3,
+ 	.lock = &clk_lock,
+ 	.hw.init = &(struct clk_init_data){
+ 		.name = "mpll2",
+@@ -488,6 +491,7 @@ static struct meson_clk_mpll gxl_mpll3 = {
+ 	},
+ 	.sdm_en = 11,
+ 	.en_dds = 0,
++	.gxlx_load = 4,
+ 	.lock = &clk_lock,
+ 	.hw.init = &(struct clk_init_data){
+ 		.name = "mpll3",

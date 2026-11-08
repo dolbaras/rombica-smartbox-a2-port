@@ -1,0 +1,99 @@
+#!/usr/bin/python3
+# "Индикатор": roles of the two colours of the front LED, like the Android "Indicator" app.
+# Each role is a kernel LED trigger of the colour (driver leds-bicolor-gpio): the window sets it
+# at once in sysfs (group "users" may, see 90-rombica-led.rules) and keeps it in
+# /etc/rombica-led/led.conf, which udev applies when the LEDs appear at boot.
+import os
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk  # noqa: E402
+
+CONF = "/etc/rombica-led/led.conf"
+ROLES = ["none", "default-on", "heartbeat", "mmc1", "rc-feedback"]      # triggers; mmc1 = microSD
+LABELS = ["Выключен", "Горит", "Мигает (сердцебиение)", "Мигает при работе с памятью",
+          "Мигает при нажатии кнопок пульта"]
+COLOURS = [("BLUE", "Синий"), ("RED", "Красный")]
+DEFAULTS = {"BLUE": "default-on", "RED": "none"}      # like the stock firmware
+SYSFS = "/sys/class/leds/rombica:%s/trigger"
+HINT = ("Светодиод на передней панели Rombica SmartBox A2 во включённом состоянии. У него "
+        "два цвета на одном выводе: если активны оба, красный показывается поверх синего. "
+        "Выбор применяется сразу.")
+
+
+def load():
+    roles = dict(DEFAULTS)
+    try:
+        with open(CONF) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k in roles and v in ROLES:
+                    roles[k] = v
+    except OSError:
+        pass
+    return roles
+
+
+def save(roles, colour):
+    with open(SYSFS % colour.lower(), "w") as f:     # at once
+        f.write(roles[colour])
+    tmp = CONF + ".tmp"
+    with open(tmp, "w") as f:                         # and at the next boot
+        f.write("# Rombica SmartBox A2 front LED: kernel LED trigger of each colour, applied by\n"
+                "# udev (90-rombica-led.rules). Red is shown over blue.\n")
+        for c, _ in COLOURS:
+            f.write("%s=%s\n" % (c, roles[c]))
+    os.replace(tmp, CONF)
+
+
+def main():
+    roles = load()
+    win = Gtk.Window(title="Индикатор")
+    win.set_border_width(24)
+    win.set_default_size(560, -1)
+    win.set_position(Gtk.WindowPosition.CENTER)
+    win.connect("destroy", Gtk.main_quit)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+    win.add(box)
+
+    title = Gtk.Label(xalign=0)
+    title.set_markup("<span size='xx-large'>Индикатор</span>")
+    box.pack_start(title, False, False, 0)
+    hint = Gtk.Label(label=HINT, xalign=0)
+    hint.set_line_wrap(True)
+    hint.set_max_width_chars(60)
+    box.pack_start(hint, False, False, 0)
+
+    grid = Gtk.Grid(column_spacing=16, row_spacing=10)
+    box.pack_start(grid, False, False, 6)
+    status = Gtk.Label(xalign=0)
+
+    def changed(combo, colour):
+        roles[colour] = ROLES[combo.get_active()]
+        try:
+            save(roles, colour)
+            status.set_text("")
+        except OSError as err:
+            status.set_text("Не удалось сохранить: %s" % err.strerror)
+
+    for row, (colour, name) in enumerate(COLOURS):
+        grid.attach(Gtk.Label(label=name, xalign=0), 0, row, 1, 1)
+        combo = Gtk.ComboBoxText(hexpand=True)
+        for label in LABELS:
+            combo.append_text(label)
+        combo.set_active(ROLES.index(roles[colour]))
+        combo.connect("changed", changed, colour)
+        grid.attach(combo, 1, row, 1, 1)
+    box.pack_start(status, False, False, 0)
+
+    close = Gtk.Button(label="Закрыть")
+    close.connect("clicked", lambda _b: win.destroy())
+    buttons = Gtk.Box()
+    buttons.pack_end(close, False, False, 0)
+    box.pack_end(buttons, False, False, 0)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

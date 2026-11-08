@@ -1,0 +1,45 @@
+From fd3de53b2e8187d810f3fc307d6f92305741b549 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 10:04:27 +0300
+Subject: [PATCH 4/5] client: log video decode failures to logcat
+
+Failed frames and codecs marked as unsupported go to logcat as well
+(tag rustdesk-mc), the RustDesk log file is often not created on
+Android.
+---
+ src/client.rs | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/client.rs b/src/client.rs
+index dcd5941..6f776bb 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -1620,6 +1620,16 @@ impl VideoHandler {
+                             "Failed to handle video frame, fail counter: {}",
+                             self.fail_counter
+                         );
++                        #[cfg(feature = "mediacodec")]
++                        scrap::mediacodec::alog(
++                            true,
++                            &format!(
++                                "{:?} frame failed ({:?}), fail counter: {}",
++                                self.decoder.format(),
++                                res.as_ref().map_err(|e| e.to_string()),
++                                self.fail_counter
++                            ),
++                        );
+                     }
+                 }
+                 self.first_frame = false;
+@@ -2974,6 +2984,8 @@ pub fn start_video_thread<F, T>(
+                                     lc.mark_unsupported.push(format);
+                                     should_update_supported = true;
+                                     log::info!("mark {format:?} decoder as unsupported, valid:{}, fail_counter:{}, all unsupported:{:?}", handler.decoder.valid(), handler.fail_counter, lc.mark_unsupported);
++                                    #[cfg(feature = "mediacodec")]
++                                    scrap::mediacodec::alog(true, &format!("mark {format:?} decoder as unsupported"));
+                                 }
+                             }
+                         }
+-- 
+2.34.1
+

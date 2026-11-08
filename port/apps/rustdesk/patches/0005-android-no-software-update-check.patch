@@ -1,0 +1,44 @@
+From 8422ec6fc7838303f7a925ec3d8dd2ab162c0359 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 10:04:27 +0300
+Subject: [PATCH 5/5] android: no software update check
+
+An official update would replace this build and drop the hardware
+decoding patches, so the Android app does not look for updates and the
+"Check for software update on startup" switch is hidden.
+---
+ flutter/lib/common.dart                     | 3 +++
+ flutter/lib/mobile/pages/settings_page.dart | 3 ++-
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index 1651f67..fdef672 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -4066,6 +4066,9 @@ void earlyAssert() {
+ }
+ 
+ void checkUpdate() {
++  // Rombica A2 build: an official update would replace the hardware decoding
++  // patches, so it does not look for updates at all.
++  if (isAndroid) return;
+   if (!isWeb) {
+     if (!bind.isCustomClient()) {
+       platformFFI.registerEventHandler(
+diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
+index cb40aff..66dbab8 100644
+--- a/flutter/lib/mobile/pages/settings_page.dart
++++ b/flutter/lib/mobile/pages/settings_page.dart
+@@ -593,7 +593,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+           gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
+         }));
+ 
+-    if (!bind.isCustomClient()) {
++    // Rombica A2 build: no update check on Android (see checkUpdate())
++    if (!bind.isCustomClient() && !isAndroid) {
+       enhancementsTiles.add(
+         SettingsTile.switchTile(
+           initialValue: _checkUpdateOnStartup,
+-- 
+2.34.1
+

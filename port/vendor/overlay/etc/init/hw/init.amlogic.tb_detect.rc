@@ -1,0 +1,2 @@
+# Rombica SmartBox A2 port: tb_detect (field order detection for the ppmgr, closed source, built
+# for SlimBOX's kernel) is not used with the port's kernel.

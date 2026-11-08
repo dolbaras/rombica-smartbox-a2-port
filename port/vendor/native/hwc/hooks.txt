@@ -1,0 +1,5 @@
+# hwcomposer.amlogic.so (after make_hwc_cursor.py and make_hwc_modes.py)
+md5 b69eebc982be7bf1836e0e92d76fb240
+import property_get property_set open read close atoi strncmp __android_log_print
+# HwcConfig::getFramebufferSize(int, uint32_t&, uint32_t&): push {r4,r5,r6,lr}; sub sp,#104
+hook rombica_fb_size 0x27cdc 70b59ab0

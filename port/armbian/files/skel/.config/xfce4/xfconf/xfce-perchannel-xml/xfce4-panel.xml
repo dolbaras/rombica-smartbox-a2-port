@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="dark-mode" type="bool" value="true"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=8;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="icon-size" type="uint" value="0"/>
+      <property name="size" type="uint" value="40"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="16"/>
+        <value type="int" value="17"/>
+        <value type="int" value="18"/>
+        <value type="int" value="19"/>
+        <value type="int" value="20"/>
+        <value type="int" value="3"/>
+        <value type="int" value="2"/>
+        <value type="int" value="23"/>
+        <value type="int" value="6"/>
+        <value type="int" value="8"/>
+        <value type="int" value="11"/>
+        <value type="int" value="12"/>
+        <value type="int" value="13"/>
+        <value type="int" value="15"/>
+        <value type="int" value="14"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="tasklist">
+      <property name="grouping" type="uint" value="1"/>
+    </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-6" type="string" value="systray">
+      <property name="square-icons" type="bool" value="true"/>
+      <property name="known-legacy-items" type="array">
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (81%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (86%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (97%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (88%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (87%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (84%)"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (53%)"/>
+        <value type="string" value="создание конфигурации сетевого соединения wi-fi «keenetic viva 2.4ghz»…"/>
+        <value type="string" value="сетевое соединение ethernet «usb-gadget» активно"/>
+        <value type="string" value="для соединения wi-fi «keenetic viva 2.4ghz» требуется аутентификация пользователя…"/>
+        <value type="string" value="сетевое соединение wi-fi «keenetic viva 2.4ghz» активно: keenetic viva 2.4ghz (100%)"/>
+        <value type="string" value="wi-fi network connection “keenetic viva 2.4ghz” active: keenetic viva 2.4ghz (100%)"/>
+        <value type="string" value="configuring wi-fi network connection “keenetic viva 2.4ghz”…"/>
+        <value type="string" value="requesting a wi-fi network address for “keenetic viva 2.4ghz”…"/>
+        <value type="string" value="rustdesk"/>
+        <value type="string" value="ethernet network connection “wired connection 1” active"/>
+      </property>
+      <property name="known-items" type="array">
+        <value type="string" value="tray-icon tray app 3474-1"/>
+        <value type="string" value="tray-icon tray app 3250-1"/>
+        <value type="string" value="tray-icon tray app 3258-1"/>
+        <value type="string" value="tray-icon tray app 1882-1"/>
+        <value type="string" value="tray-icon tray app 1735-1"/>
+        <value type="string" value="tray-icon tray app 1685-1"/>
+        <value type="string" value="tray-icon tray app 3217-1"/>
+        <value type="string" value="tray-icon tray app 2137-1"/>
+        <value type="string" value="tray-icon tray app 6667-1"/>
+      </property>
+    </property>
+    <property name="plugin-8" type="string" value="pulseaudio">
+      <property name="enable-keyboard-shortcuts" type="bool" value="true"/>
+      <property name="show-notifications" type="bool" value="true"/>
+      <property name="mpris-players" type="string" value="chromium.instance1741;chromium.instance1881;chromium.instance2355;falkon.instance18975;org.gnome.Epiphany.Sandboxed.instance-30;org.gnome.Epiphany.Sandboxed.instance-40"/>
+    </property>
+    <property name="plugin-11" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-12" type="string" value="clock"/>
+    <property name="plugin-13" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-14" type="string" value="actions"/>
+    <property name="plugin-15" type="string" value="showdesktop"/>
+    <property name="plugin-16" type="string" value="separator"/>
+    <property name="plugin-17" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="17907347421.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-18" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="17907347422.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-19" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="17907347423.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-20" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="17907347434.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-21" type="string" value="separator"/>
+    <property name="plugin-22" type="string" value="directorymenu">
+    </property>
+    <property name="plugin-23" type="string" value="xkb"/>
+  </property>
+</channel>

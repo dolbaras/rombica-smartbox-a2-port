@@ -1,0 +1,151 @@
+From 03edc7cd63d7d8994f6593f88cb4f7cdff4c392b Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 10:04:27 +0300
+Subject: [PATCH 2/5] android: hardware decoders and a texture for them
+
+setCodecInfo() dropped every decoder, and before Android 10 it treated
+only a fixed list of vendors as hardware, so OMX.amlogic.* and other TV
+box decoders were never found. Keep the decoders and, before Android 10,
+count a decoder that is not a known software one as hardware.
+
+Add create_video_texture / release_video_texture: a SurfaceTexture entry
+of the Flutter engine whose Surface is handed to the Rust side
+(FFI.setVideoSurface) for the hardware decoder to render into.
+---
+ .../com/carriez/flutter_hbb/MainActivity.kt   | 56 ++++++++++++++++++-
+ flutter/android/app/src/main/kotlin/ffi.kt    |  3 +
+ 2 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index 5561b88..66da37a 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -18,6 +18,7 @@ import android.os.Bundle
+ import android.os.Build
+ import android.os.IBinder
+ import android.util.Log
++import android.view.Surface
+ import android.view.WindowManager
+ import android.media.MediaCodecInfo
+ import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+@@ -32,6 +33,7 @@ import com.hjq.permissions.XXPermissions
+ import io.flutter.embedding.android.FlutterActivity
+ import io.flutter.embedding.engine.FlutterEngine
+ import io.flutter.plugin.common.MethodChannel
++import io.flutter.view.TextureRegistry
+ import kotlin.concurrent.thread
+ 
+ 
+@@ -47,6 +49,11 @@ class MainActivity : FlutterActivity() {
+     private val logTag = "mMainActivity"
+     private var mainService: MainService? = null
+ 
++    // texture the hardware video decoder renders into, shared by the remote pages
++    private var videoTexture: TextureRegistry.SurfaceTextureEntry? = null
++    private var videoSurface: Surface? = null
++    private var videoTextureUsers = 0
++
+     private var isAudioStart = false
+     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
+ 
+@@ -104,8 +111,43 @@ class MainActivity : FlutterActivity() {
+         }
+     }
+ 
++    private fun createVideoTexture(): Long {
++        if (videoTexture == null) {
++            val entry = flutterEngine?.renderer?.createSurfaceTexture() ?: return -1
++            val surface = Surface(entry.surfaceTexture())
++            try {
++                FFI.setVideoSurface(surface)
++            } catch (e: UnsatisfiedLinkError) {
++                Log.e(logTag, "setVideoSurface: $e")
++                surface.release()
++                entry.release()
++                return -1
++            }
++            videoTexture = entry
++            videoSurface = surface
++        }
++        videoTextureUsers++
++        return videoTexture!!.id()
++    }
++
++    private fun releaseVideoTexture(all: Boolean) {
++        videoTextureUsers = if (all) 0 else maxOf(videoTextureUsers - 1, 0)
++        if (videoTextureUsers > 0 || videoTexture == null) {
++            return
++        }
++        try {
++            FFI.setVideoSurface(null)
++        } catch (e: UnsatisfiedLinkError) {
++        }
++        videoSurface?.release()
++        videoTexture?.release()
++        videoSurface = null
++        videoTexture = null
++    }
++
+     override fun onDestroy() {
+         Log.e(logTag, "onDestroy")
++        releaseVideoTexture(true)
+         mainService?.let {
+             unbindService(serviceConnection)
+         }
+@@ -129,6 +171,13 @@ class MainActivity : FlutterActivity() {
+         flutterMethodChannel.setMethodCallHandler { call, result ->
+             // make sure result will be invoked, otherwise flutter will await forever
+             when (call.method) {
++                "create_video_texture" -> {
++                    result.success(createVideoTexture())
++                }
++                "release_video_texture" -> {
++                    releaseVideoTexture(false)
++                    result.success(null)
++                }
+                 "init_service" -> {
+                     Intent(activity, MainService::class.java).also {
+                         bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
+@@ -307,6 +356,10 @@ class MainActivity : FlutterActivity() {
+                     hw = false
+                 } else if (listOf("c2.qti", "OMX.qcom.video", "OMX.Exynos", "OMX.hisi", "OMX.MTK", "OMX.Intel", "OMX.Nvidia").any { codec.name.startsWith(it, true) }) {
+                     hw = true
++                } else if (!codec.isEncoder) {
++                    // decoders: anything that is not a known software one is a vendor (hardware) decoder,
++                    // e.g. OMX.amlogic.* on Android TV boxes
++                    hw = true
+                 }
+             }
+             if (hw != true) {
+@@ -346,9 +399,6 @@ class MainActivity : FlutterActivity() {
+                         codecObject.put("low_latency", caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
+                     }
+                 }
+-                if (!codec.isEncoder) {
+-                    return@forEach
+-                }
+                 codecArray.put(codecObject)
+             }
+         }
+diff --git a/flutter/android/app/src/main/kotlin/ffi.kt b/flutter/android/app/src/main/kotlin/ffi.kt
+index e3c9d98..f61593d 100644
+--- a/flutter/android/app/src/main/kotlin/ffi.kt
++++ b/flutter/android/app/src/main/kotlin/ffi.kt
+@@ -3,6 +3,7 @@
+ package ffi
+ 
+ import android.content.Context
++import android.view.Surface
+ import java.nio.ByteBuffer
+ 
+ import com.carriez.flutter_hbb.RdClipboardManager
+@@ -27,4 +28,6 @@ object FFI {
+     external fun getBuildinOption(key: String): String
+     external fun onClipboardUpdate(clips: ByteBuffer)
+     external fun isServiceClipboardEnabled(): Boolean
++    // Surface of the texture the hardware decoder renders the remote screen into, null to drop it
++    external fun setVideoSurface(surface: Surface?)
+ }
+-- 
+2.34.1
+

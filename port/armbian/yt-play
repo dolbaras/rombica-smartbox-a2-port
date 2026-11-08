@@ -1,0 +1,70 @@
+#!/bin/bash
+# yt-play [URL|file] [max-height] -- play YouTube (or a local H.264 file) with the S905L2 hardware
+# H.264 decoder (meson-vdec).
+#
+# Browsers cannot use the hardware here: Chromium needs OpenGL ES 3, the Mali-450 only has ES 2,
+# so browsers decode and scale video on the CPU. mpv 0.35 crashes on the v4l2m2m decoder, so
+# ffmpeg decodes (h264_v4l2m2m) and passes raw NV12 frames to mpv, which only scales on the GPU.
+#   * from the browser: the "▶ HW" bookmark on a YouTube page (pauses the page, opens ytplay:<URL>)
+#   * no URL argument: the URL is taken from the clipboard (copy the link in the browser first)
+#   * max-height: 1080 (default) or 720/480 for a slow network
+#   * sources above 30 fps are shown at 30 fps: copying 60 decoded 1080p frames a second out of
+#     the decoder is too much for the CPU
+#   * the decoder hangs on the end-of-stream drain, so decoding stops 1 s before the end
+# Keys are mpv's (space pause, q quit, f fullscreen); seeking is not possible (the input is a pipe).
+set -u
+src=${1:-$(xclip -o -selection clipboard 2>/dev/null)}
+src=${src#ytplay:}      # from the "▶ HW" bookmark: ytplay:<page URL> (x-scheme-handler, yt-play.desktop)
+max=${2:-1080}
+say() { echo "yt-play: $*" >&2; notify-send -i video-display "YouTube HW" "$*" 2>/dev/null || true; }
+[ -n "$src" ] || { say "нет ссылки: скопируйте адрес ролика и запустите снова"; exit 1; }
+
+ua="Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+if [ -f "$src" ]; then
+    vurl=$src; aurl=""; title=$(basename "$src")
+    fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 "$src")
+    dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$src")
+    ffprobe -v error -select_streams a:0 -show_entries stream=index -of csv=p=0 "$src" | grep -q . && aurl=$src
+else
+    say "получаю ссылку на поток…"
+    json=$(yt-dlp --no-warnings --no-playlist -j \
+        -f "bv*[vcodec^=avc1][height<=$max]+ba[ext=m4a]/b[vcodec^=avc1][height<=$max]" "$src") ||
+        { say "yt-dlp не смог получить ролик (нет сети или H.264 недоступен)"; exit 1; }
+    mapfile -t f < <(python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+fm = d.get("requested_formats") or [d]
+v = fm[0]; a = fm[1] if len(fm) > 1 else v
+print(v["url"]); print(a["url"] if a is not v else "")
+print(v.get("fps") or 30); print(d.get("duration") or 0); print(d.get("title") or "YouTube")
+print("%sx%s" % (v.get("width"), v.get("height")))' <<<"$json")
+    vurl=${f[0]}; aurl=${f[1]}; fps=${f[2]}; dur=${f[3]}; title=${f[4]}
+    say "$title (${f[5]}, аппаратное декодирование)"
+fi
+
+net=(-user_agent "$ua" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5)
+[ -f "$src" ] && net=()
+in=("${net[@]}" -c:v h264_v4l2m2m -i "$vurl")
+map=(-map 0:v:0)
+if [ -n "$aurl" ]; then
+    if [ "$aurl" = "$vurl" ]; then map+=(-map 0:a:0); else in+=("${net[@]}" -i "$aurl"); map+=(-map 1:a:0); fi
+fi
+vf=()
+python3 -c "import sys; from fractions import Fraction; sys.exit(0 if Fraction('$fps') > 31 else 1)" 2>/dev/null &&
+    vf=(-vf fps=30)
+len=()
+python3 -c "import sys; sys.exit(0 if float('$dur') > 2 else 1)" 2>/dev/null &&
+    len=(-t "$(python3 -c "print(float('$dur') - 1)")")
+
+# ffmpeg runs in the background: when mpv quits, ffmpeg may sit waiting on the decoder (not writing
+# to the pipe, so no SIGPIPE) and would keep the decoder's buffers (most of the 256 MB CMA) forever.
+fifo=$(mktemp -u /tmp/yt-play.XXXXXX); mkfifo "$fifo"
+ffmpeg -nostdin -loglevel error "${in[@]}" "${len[@]}" "${map[@]}" "${vf[@]}" \
+    -c:v rawvideo -pix_fmt nv12 -c:a copy -f nut - > "$fifo" &
+dec=$!
+mpv --vo=gpu --gpu-context=x11egl --hwdec=no --fs --demuxer-max-bytes=64MiB \
+    --force-media-title="$title" "$fifo"
+kill -KILL $dec 2>/dev/null
+wait $dec 2>/dev/null
+rm -f "$fifo"
+exit 0

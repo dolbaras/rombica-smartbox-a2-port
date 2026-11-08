@@ -1,0 +1,1437 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Tue, 6 Oct 2026 15:15:51 +0300
+Subject: [PATCH 3/4] hdmitx: PC monitors on HDMI
+
+The bootloader showed no picture on a 1280x1024 monitor: it always set
+the saved hdmimode (default 1080p60hz) without asking the sink, and
+refused VESA modes altogether ("vout output 1280x1024p60hz" failed:
+hdmi_outputmode_check() knew only TV modes).
+
+- "hdmitx sink_mode" (run by the board after "hdmitx hpd", before
+  "vout output"): reads and parses the EDID; if the sink does not list
+  outputmode, or it is faster than the sink's range limits, this boot
+  uses the sink's native mode (first detailed timing, else the listed
+  VESA mode of its size and rate, else the preferred CEA mode ...).
+  outputmode and hdmimode change in the running environment only.
+- EDID: VESA modes from established timings, standard timings,
+  Established Timings III and detailed timings; display range limits;
+  native mode; the "first SVD" rule only with a CEA block; detailed
+  timings whose clock has a zero low byte were skipped.
+- output: the VESA modes and 2560x1080 (VIC 90) in the mode list; RGB
+  8 bit for VESA modes and DVI sinks (the old check sat after a
+  "break"); DVI mode for sinks without HDMI VSDB; sync polarity from the
+  mode; PHY preset by TMDS rate; vout field_height for VESA modes,
+  2560x1440p60hz added.
+- OSD window of VESA modes: the position systemcontrol keeps for the
+  mode (<mode>_x/_y/_w/_h, default the whole screen) instead of the
+  1080p one, and the 1920x1080 logo / boot menu keeps its aspect ratio
+  inside it (1280x1024: 1280x720 with borders) instead of being
+  stretched.
+- tables as in VESA DMT and the kernel (port/tools/check_vesa_tables.py):
+  800x600, 1024x768, 1280x960, 1360x768 pixel clocks/totals, sync
+  polarities, 1280x800 normal blanking (83.5 MHz), 2560x1080/2560x1440
+  real timings, encoder tables and HDMI PLL settings (3960000, 4830000).
+---
+ .../cpu/armv8/gxl/hdmitx20/enc_clk_config.c   |  35 ++-
+ arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c  | 104 ++++++--
+ .../arm/cpu/armv8/gxl/hdmitx20/hdmitx_tvenc.c |  55 ++--
+ board/amlogic/gxl_p271_v1/gxl_p271_v1.c       |   6 +-
+ common/cmd_hdmitx.c                           |  93 +++++--
+ common/hdmi_edid_parsing.c                    | 242 +++++++++++++++++-
+ common/hdmi_parameters.c                      | 155 ++++++-----
+ drivers/display/vout/vout.c                   |  65 ++++-
+ include/amlogic/hdmi.h                        |  31 ++-
+ 9 files changed, 635 insertions(+), 151 deletions(-)
+
+diff --git a/arch/arm/cpu/armv8/gxl/hdmitx20/enc_clk_config.c b/arch/arm/cpu/armv8/gxl/hdmitx20/enc_clk_config.c
+index c416977..86d4050 100644
+--- a/arch/arm/cpu/armv8/gxl/hdmitx20/enc_clk_config.c
++++ b/arch/arm/cpu/armv8/gxl/hdmitx20/enc_clk_config.c
+@@ -417,6 +417,33 @@ static void set_hpll_clk_out(unsigned clk)
+ 		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
+ 		printk("HPLL: 0x%lx\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
+ 		break;
++	/* 2560x1080 (198 MHz, VIC 90), 2560x1440 (241.5 MHz):
++	 * VCO = 24 MHz * (M + frac / 1024), M in CNTL[8:0], frac in CNTL1[9:0]
++	 */
++	case 3960000:
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002a5);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL2, 0x860f30c4);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL3, 0x0c8e0000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL4, 0x001fa729);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL5, 0x01a31500);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x1, 28, 1);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x0, 28, 1);
++		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++		printk("HPLL: 0x%lx\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
++		break;
++	case 4830000:
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002c9);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb100);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL2, 0x860f30c4);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL3, 0x0c8e0000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL4, 0x001fa729);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL5, 0x01a31500);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x1, 28, 1);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x0, 28, 1);
++		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++		printk("HPLL: 0x%lx\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
++		break;
+ 	case 4838400:
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002c9);
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb266);
+@@ -745,7 +772,7 @@ static struct hw_enc_clk_val_group setting_enc_clk_val_24[] = {
+ 		1, VIU_ENCP, 3180000, 4, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+ 	{{HDMIV_1280x800p60hz,
+ 	  GROUP_END},
+-		1, VIU_ENCP, 5680000, 4, 2, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
++		1, VIU_ENCP, 3340000, 4, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+ 	{{HDMIV_1152x864p75hz,
+ 	  HDMIV_1280x960p60hz,
+ 	  HDMIV_1280x1024p60hz,
+@@ -780,6 +807,12 @@ static struct hw_enc_clk_val_group setting_enc_clk_val_24[] = {
+ 	{{HDMIV_2560x1600p60hz,
+ 	  GROUP_END},
+ 		1, VIU_ENCP, 3485000, 1, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
++	{{HDMI_2560x1080p60_64x27,
++	  GROUP_END},
++		1, VIU_ENCP, 3960000, 1, 2, 2, VID_PLL_DIV_5, 1, 1, 1, -1},
++	{{HDMIV_2560x1440p60hz,
++	  GROUP_END},
++		1, VIU_ENCP, 4830000, 2, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+ };
+ 
+ /* For colordepth 10bits */
+diff --git a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
+index 03b4332..e89286c 100644
+--- a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
++++ b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
+@@ -349,6 +349,28 @@ static struct hdmi_support_mode gxbb_modes[] = {
+ 	{HDMI_720x480p60_16x9, "480p60hz", 0},
+ 	{HDMI_720x576i50_16x9, "576i50hz", 0},
+ 	{HDMI_720x480i60_16x9, "480i60hz", 0},
++	/* 64:27 monitors (CEA-861 VIC 90) */
++	{HDMI_2560x1080p60_64x27, "2560x1080p60hz", 0},
++	/* PC monitors: the VESA DMT modes whose timing, encoder and clock
++	 * tables are checked by port/tools/check_vesa_tables.py
++	 */
++	{HDMIV_2560x1440p60hz, "2560x1440p60hz", 0},
++	{HDMIV_1920x1200p60hz, "1920x1200p60hz", 0},
++	{HDMIV_1680x1050p60hz, "1680x1050p60hz", 0},
++	{HDMIV_1600x1200p60hz, "1600x1200p60hz", 0},
++	{HDMIV_1600x900p60hz, "1600x900p60hz", 0},
++	{HDMIV_1440x900p60hz, "1440x900p60hz", 0},
++	{HDMIV_1400x1050p60hz, "1400x1050p60hz", 0},
++	{HDMIV_1366x768p60hz, "1366x768p60hz", 0},
++	{HDMIV_1360x768p60hz, "1360x768p60hz", 0},
++	{HDMIV_1280x1024p60hz, "1280x1024p60hz", 0},
++	{HDMIV_1280x960p60hz, "1280x960p60hz", 0},
++	{HDMIV_1280x800p60hz, "1280x800p60hz", 0},
++	{HDMIV_1280x768p60hz, "1280x768p60hz", 0},
++	{HDMIV_1152x864p75hz, "1152x864p75hz", 0},
++	{HDMIV_1024x768p60hz, "1024x768p60hz", 0},
++	{HDMIV_800x600p60hz, "800x600p60hz", 0},
++	{HDMIV_640x480p60hz, "640x480p60hz", 0},
+ };
+ 
+ static void hdmitx_list_support_modes(void)
+@@ -1307,6 +1329,19 @@ do { \
+ 	RESET_HDMI_PHY();
+ #undef RESET_HDMI_PHY
+ 
++	/* PC monitor modes (and VIC 90): the PHY preset of their TMDS rate */
++	if (hdev->vic >= HDMITX_VESA_OFFSET ||
++	    hdev->vic == HDMI_2560x1080p60_64x27) {
++		if (hdev->para->tmds_clk > 148500)
++			set_phy_by_mode(2);	/* up to 2.97 Gbps */
++		else if (hdev->para->tmds_clk > 74250)
++			set_phy_by_mode(3);	/* up to 1.485 Gbps */
++		else
++			set_phy_by_mode(4);
++		printk("hdmitx phy setting done\n");
++		return;
++	}
++
+ 	switch (hdev->vic) {
+ 	case HDMI_3840x2160p50_16x9:
+ 	case HDMI_3840x2160p60_16x9:
+@@ -2030,6 +2065,23 @@ static void hdmi_tvenc_set_def(enum hdmi_vic vic)
+ 		VSYNC_LINES = 5;
+ 		SOF_LINES = 36;
+ 		break;
++	case HDMI_2560x1080p60_64x27: {
++		struct hdmi_cea_timing *t = &hdmi_get_fmt_paras(vic)->timing;
++
++		INTERLACE_MODE = 0;
++		PIXEL_REPEAT_VENC = 0;
++		PIXEL_REPEAT_HDMI = 0;
++		ACTIVE_PIXELS = t->h_active;
++		ACTIVE_LINES = t->v_active;
++		LINES_F0 = t->v_total;
++		LINES_F1 = t->v_total;
++		FRONT_PORCH = t->h_front;
++		HSYNC_PIXELS = t->h_sync;
++		BACK_PORCH = t->h_back;
++		VSYNC_LINES = t->v_sync;
++		SOF_LINES = t->v_back;
++		break;
++	}
+ 	default:
+ 		break;
+ 	}
+@@ -2317,37 +2369,24 @@ static void hdmi_tvenc_vesa_set(enum hdmi_vic vic)
+ 		hd_write_reg(P_ENCP_DVI_VSO_END_ODD, vso_begin_odd);
+ 	}
+ 
+-	switch (vic) {
+-	case HDMIV_640x480p60hz:
+-		hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+-				(0 << 1) |
+-				(0 << 2) |
+-				(0 << 3) |
+-				(0 << 4) |
+-				(4 << 5) |
+-				(0 << 8) |
+-				(0 << 12)
+-		);
+-		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+-		break;
+-	default:
+-		hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+-				(0 << 1) | /* [	1] src_sel_encp */
+-				(HSYNC_POLARITY << 2) |
+-				(VSYNC_POLARITY << 3) |
+-				(0 << 4) |
+-				(4 << 5) |
+-				(0 << 8) |
+-				(0 << 12)
+-		);
+-		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+-	}
++	/* sync polarity of the mode (VESA DMT: e.g. 1024x768 -/-,
++	 * 1280x1024 +/+, 1680x1050 -/+); 1 = active high
++	 */
++	hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
++			(0 << 1) | /* [	1] src_sel_encp */
++			(vtiming->hsync_polarity << 2) |
++			(vtiming->vsync_polarity << 3) |
++			(0 << 4) |
++			(4 << 5) |
++			(0 << 8) |
++			(0 << 12)
++	);
+ 	hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+ }
+ 
+ static void hdmi_tvenc_set(enum hdmi_vic vic)
+ {
+-	if ((vic & HDMITX_VESA_OFFSET) == HDMITX_VESA_OFFSET) {
++	if (vic >= HDMITX_VESA_OFFSET) {
+ 		/* VESA modes setting */
+ 		hdmi_tvenc_vesa_set(vic);
+ 		return;
+@@ -2582,6 +2621,13 @@ static void save_hdmitx_format(enum hdmi_vic vic, int y420)
+ {
+ 	unsigned int data32;
+ 
++	/* VESA modes (AVI VIC 0): the whole mode number, as the kernel records it
++	 * (hdmi_tx_hw.c); it takes the mode over from here ("already display")
++	 */
++	if (vic >= HDMITX_VESA_OFFSET) {
++		hd_write_reg(P_ISA_DEBUG_REG0, vic);
++		return;
++	}
+ 	data32 = vic & 0xff;
+ 	data32 |= (hdmitx_rd_reg(HDMITX_DWC_FC_VSDPAYLOAD1) & 0x7) << 8;
+ 	data32 |= (!!y420) << 11;
+@@ -2752,7 +2798,11 @@ static void hdmitx_set_hw(struct hdmitx_dev* hdev)
+ 	}
+ 	hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF, 0, 3, 1);
+ 	msleep(1);
+-	hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF, 1, 3, 1);
++	/* HDMI mode, or DVI mode (no data islands) for a sink without HDMI
++	 * VSDB, as the kernel does
++	 */
++	hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF,
++		!hdmitx_edid_is_dvi(&hdev->RXCap), 3, 1);
+ }
+ 
+ // Use this self-made function rather than %, because % appears to produce wrong
+diff --git a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_tvenc.c b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_tvenc.c
+index 3572484..00044db 100644
+--- a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_tvenc.c
++++ b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_tvenc.c
+@@ -927,14 +927,14 @@ static const struct reg_t tvregs_vesa_1280x800p60hz[] = {
+ 
+ 	{P_ENCP_VIDEO_MODE, 0x4040,},
+ 	{P_ENCP_VIDEO_MODE_ADV, 0x18,},
+-	{P_ENCP_VIDEO_MAX_PXCNT, 0x59F,},
+-	{P_ENCP_VIDEO_MAX_LNCNT, 0x336,},
+-	{P_ENCP_VIDEO_HAVON_BEGIN, 0x70,},
+-	{P_ENCP_VIDEO_HAVON_END, 0x56F,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x14,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x333,},
++	{P_ENCP_VIDEO_MAX_PXCNT, 0x68F,},
++	{P_ENCP_VIDEO_MAX_LNCNT, 0x33E,},
++	{P_ENCP_VIDEO_HAVON_BEGIN, 0x148,},
++	{P_ENCP_VIDEO_HAVON_END, 0x647,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x1C,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x33B,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+-	{P_ENCP_VIDEO_HSO_END, 0x20,},
++	{P_ENCP_VIDEO_HSO_END, 0x80,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+ 	{P_ENCP_VIDEO_VSO_END, 0x32,},
+ 	{P_ENCP_VIDEO_VSO_BLINE, 0x0,},
+@@ -1295,26 +1295,25 @@ static const struct reg_t tvregs_vesa_2560x1600p60hz[] = {
+ 	{MREG_END_MARKER, 0}
+ };
+ 
+-#if 0 /* TODO */
+-static const struct reg_t tvregs_vesa_2560x1080p60hz[] = {
++/* CEA-861 VIC 90 */
++static const struct reg_t tvregs_2560x1080p60hz[] = {
+ 	{P_ENCP_VIDEO_EN, 0,},
+ 	{P_ENCI_VIDEO_EN, 0,},
+ 
+ 	{P_ENCP_VIDEO_MODE, 0x4040,},
+ 	{P_ENCP_VIDEO_MODE_ADV, 0x18,},
+-	{P_ENCP_VIDEO_MAX_PXCNT, 0xA1F,},
+-	{P_ENCP_VIDEO_MAX_LNCNT, 0x4DC,},
+-	{P_ENCP_VIDEO_HAVON_BEGIN, 0x218,},
+-	{P_ENCP_VIDEO_HAVON_END, 0x997,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x2A,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x4D9,},
++	{P_ENCP_VIDEO_MAX_PXCNT, 0xBB7,},
++	{P_ENCP_VIDEO_MAX_LNCNT, 0x44B,},
++	{P_ENCP_VIDEO_HAVON_BEGIN, 0xC0,},
++	{P_ENCP_VIDEO_HAVON_END, 0xABF,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x10,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x447,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+-	{P_ENCP_VIDEO_HSO_END, 0xC8,},
++	{P_ENCP_VIDEO_HSO_END, 0x2C,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+ 	{P_ENCP_VIDEO_VSO_END, 0x32,},
+ 	{P_ENCP_VIDEO_VSO_BLINE, 0x0,},
+-	{P_ENCP_VIDEO_VSO_ELINE, 0x6,},
+-
++	{P_ENCP_VIDEO_VSO_ELINE, 0x5,},
+ 
+ 	{P_VPU_VIU_VENC_MUX_CTRL, 0xA},
+ 	{P_ENCI_VIDEO_EN, 0},
+@@ -1328,19 +1327,18 @@ static const struct reg_t tvregs_vesa_2560x1440p60hz[] = {
+ 
+ 	{P_ENCP_VIDEO_MODE, 0x4040,},
+ 	{P_ENCP_VIDEO_MODE_ADV, 0x18,},
+-	{P_ENCP_VIDEO_MAX_PXCNT, 0xA1F,},
+-	{P_ENCP_VIDEO_MAX_LNCNT, 0x4DC,},
+-	{P_ENCP_VIDEO_HAVON_BEGIN, 0x218,},
+-	{P_ENCP_VIDEO_HAVON_END, 0x997,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x2A,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x4D9,},
++	{P_ENCP_VIDEO_MAX_PXCNT, 0xA9F,},
++	{P_ENCP_VIDEO_MAX_LNCNT, 0x5C8,},
++	{P_ENCP_VIDEO_HAVON_BEGIN, 0x70,},
++	{P_ENCP_VIDEO_HAVON_END, 0xA6F,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x26,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x5C5,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+-	{P_ENCP_VIDEO_HSO_END, 0xC8,},
++	{P_ENCP_VIDEO_HSO_END, 0x20,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+ 	{P_ENCP_VIDEO_VSO_END, 0x32,},
+ 	{P_ENCP_VIDEO_VSO_BLINE, 0x0,},
+-	{P_ENCP_VIDEO_VSO_ELINE, 0x6,},
+-
++	{P_ENCP_VIDEO_VSO_ELINE, 0x5,},
+ 
+ 	{P_VPU_VIU_VENC_MUX_CTRL, 0xA},
+ 	{P_ENCI_VIDEO_EN, 0},
+@@ -1348,6 +1346,7 @@ static const struct reg_t tvregs_vesa_2560x1440p60hz[] = {
+ 	{MREG_END_MARKER, 0}
+ };
+ 
++#if 0 /* TODO */
+ static const struct reg_t tvregs_vesa_3440x1440p60hz[] = {
+ 	{P_ENCP_VIDEO_EN, 0,},
+ 	{P_ENCI_VIDEO_EN, 0,},
+@@ -1448,6 +1447,8 @@ static struct vic_tvregs_set tvregsTab[] = {
+ 	{HDMIV_1920x1200p60hz, tvregs_vesa_1920x1200p60hz},
+ 	{HDMIV_2160x1200p90hz, tvregs_vesa_2160x1200p90hz},
+ 	{HDMIV_2560x1600p60hz, tvregs_vesa_2560x1600p60hz},
++	{HDMI_2560x1080p60_64x27, tvregs_2560x1080p60hz},
++	{HDMIV_2560x1440p60hz, tvregs_vesa_2560x1440p60hz},
+ };
+ 
+ static inline void setreg(const struct reg_t *r)
+diff --git a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+index c9b870e..f4105eb 100644
+--- a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
++++ b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+@@ -460,7 +460,11 @@ int board_late_init(void){
+ 	vpp_init();
+ #ifndef CONFIG_AML_IRDETECT_EARLY
+ 	/* after  */
+-	run_command("cvbs init;hdmitx hpd", 0);
++	/* outputmode: the saved hdmimode if a sink is plugged in, else cvbsmode;
++	 * then a mode that sink can show (its EDID decides, e.g. a monitor's
++	 * native 1280x1024p60hz instead of the default 1080p60hz)
++	 */
++	run_command("cvbs init;hdmitx hpd;hdmitx sink_mode", 0);
+ 	run_command("vout output $outputmode", 0);
+ #endif
+ 
+diff --git a/common/cmd_hdmitx.c b/common/cmd_hdmitx.c
+index 84061b4..c6125cf 100644
+--- a/common/cmd_hdmitx.c
++++ b/common/cmd_hdmitx.c
+@@ -272,9 +272,12 @@ static int do_output(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
+ 				printf("set cs as %d\n", HDMI_COLOR_FORMAT_444);
+ 			}
+ 			break;
+-		/* For VESA modes, should be RGB format */
+-		if (hdmitx_device.vic >= HDMITX_VESA_OFFSET)
++		}
++		/* VESA modes and DVI sinks: RGB 8 bit, as in the kernel */
++		if (hdmitx_device.vic >= HDMITX_VESA_OFFSET ||
++		    hdmitx_edid_is_dvi(&hdmitx_device.RXCap)) {
+ 			hdmitx_device.para->cs = HDMI_COLOR_FORMAT_RGB;
++			hdmitx_device.para->cd = HDMI_COLOR_DEPTH_24B;
+ 		}
+ 		hdmi_tx_set(&hdmitx_device);
+ 	}
+@@ -319,29 +322,18 @@ static int do_info(cmd_tbl_t * cmdtp, int flag, int argc, char * const argv[])
+ 	return 1;
+ }
+ 
+-static int do_get_preferred_mode(cmd_tbl_t * cmdtp, int flag, int argc,
+-	char * const argv[])
++/* read the sink's whole EDID (up to 4 blocks) and parse it into RXCap */
++static void hdmitx_read_parse_edid(struct hdmitx_dev *hdev)
+ {
+-	struct hdmitx_dev *hdev = &hdmitx_device;
+ 	unsigned int byte_num = 0;
+ 	unsigned char *edid = hdev->rawedid;
+ 	unsigned char blk_no = 1;
+-	struct hdmi_format_para *para;
+-	char pref_mode[64];
+-	char color_attr[64];
+-	char *hdmi_read_edid;
+-
+-	hdmi_read_edid = getenv("hdmi_read_edid");
+-	if (hdmi_read_edid && (hdmi_read_edid[0] == '0'))
+-		return 0;
+ 
+ 	memset(edid, 0, EDID_BLK_SIZE * EDID_BLK_NO);
+-	memset(pref_mode, 0, sizeof(pref_mode));
+-	memset(color_attr, 0, sizeof(color_attr));
+ 
+ 	/* Read complete EDID data sequentially */
+ 	while (byte_num < 128 * blk_no) {
+-		hdmitx_device.HWOp.read_edid(&edid[byte_num], byte_num & 0x7f, byte_num / 128);
++		hdev->HWOp.read_edid(&edid[byte_num], byte_num & 0x7f, byte_num / 128);
+ 		if (byte_num == 120) {
+ 			blk_no = edid[126] + 1;
+ 			if (blk_no > 4)
+@@ -354,6 +346,25 @@ static int do_get_preferred_mode(cmd_tbl_t * cmdtp, int flag, int argc,
+ 		if (0)
+ 			dump_full_edid(hdev->rawedid);
+ 	}
++}
++
++static int do_get_preferred_mode(cmd_tbl_t * cmdtp, int flag, int argc,
++	char * const argv[])
++{
++	struct hdmitx_dev *hdev = &hdmitx_device;
++	struct hdmi_format_para *para;
++	char pref_mode[64];
++	char color_attr[64];
++	char *hdmi_read_edid;
++
++	hdmi_read_edid = getenv("hdmi_read_edid");
++	if (hdmi_read_edid && (hdmi_read_edid[0] == '0'))
++		return 0;
++
++	memset(pref_mode, 0, sizeof(pref_mode));
++	memset(color_attr, 0, sizeof(color_attr));
++
++	hdmitx_read_parse_edid(hdev);
+ 	para = hdmi_get_fmt_paras(hdev->RXCap.preferred_mode);
+ 
+ 	if (para) {
+@@ -385,6 +396,52 @@ static int do_get_preferred_mode(cmd_tbl_t * cmdtp, int flag, int argc,
+ 	return 0;
+ }
+ 
++/*
++ * hdmitx sink_mode: make outputmode (after "hdmitx hpd": the saved hdmimode) a
++ * mode the connected sink can show, before "vout output $outputmode".
++ * The sink's EDID decides, as in the kernel: outputmode stays if the sink
++ * lists it and it is within the sink's range limits; else this boot uses the
++ * sink's native mode (a monitor's first detailed timing, e.g. 1280x1024p60hz,
++ * or a TV's preferred mode). Only the running environment changes (outputmode
++ * and hdmimode, which the kernel takes as the mode U-Boot set): the saved
++ * choice stays, and Android sets its own output once it runs.
++ */
++static int do_sink_mode(cmd_tbl_t *cmdtp, int flag, int argc,
++	char *const argv[])
++{
++	struct hdmitx_dev *hdev = &hdmitx_device;
++	struct hdmi_format_para *para;
++	char *mode = getenv("outputmode");
++	char *hdmi_read_edid = getenv("hdmi_read_edid");
++	enum hdmi_vic vic;
++
++	if (!mode || !hdev->HWOp.get_hpd_state())
++		return CMD_RET_SUCCESS;		/* no HDMI sink */
++	if (hdmi_read_edid && hdmi_read_edid[0] == '0')
++		return CMD_RET_SUCCESS;
++	hdmitx_read_parse_edid(hdev);
++	if (!hdev->RXCap.edid_valid) {
++		printf("hdmitx: no valid EDID, outputmode %s kept\n", mode);
++		return CMD_RET_SUCCESS;
++	}
++	if (hdmi_outputmode_check(mode) == 0 &&
++	    hdmitx_edid_mode_supported(&hdev->RXCap, hdmi_get_fmt_vic(mode),
++				       strstr(mode, "420") != NULL))
++		return CMD_RET_SUCCESS;
++
++	vic = hdmitx_edid_native_mode(&hdev->RXCap);
++	para = vic == HDMI_unkown ? NULL : hdmi_get_fmt_paras(vic);
++	if (!para || !para->sname || hdmi_outputmode_check(para->sname)) {
++		printf("hdmitx: sink takes neither %s nor a mode of ours\n", mode);
++		return CMD_RET_SUCCESS;
++	}
++	printf("hdmitx: sink does not take %s, using its native mode %s\n",
++	       mode, para->sname);
++	setenv("outputmode", para->sname);
++	setenv("hdmimode", para->sname);
++	return CMD_RET_SUCCESS;
++}
++
+ static cmd_tbl_t cmd_hdmi_sub[] = {
+ 	U_BOOT_CMD_MKENT(hpd, 1, 1, do_hpd_detect, "", ""),
+ 	U_BOOT_CMD_MKENT(edid, 3, 1, do_edid, "", ""),
+@@ -395,6 +452,7 @@ static cmd_tbl_t cmd_hdmi_sub[] = {
+ 	U_BOOT_CMD_MKENT(dump, 1, 1, do_dump, "", ""),
+ 	U_BOOT_CMD_MKENT(info, 1, 1, do_info, "", ""),
+ 	U_BOOT_CMD_MKENT(get_preferred_mode, 1, 1, do_get_preferred_mode, "", ""),
++	U_BOOT_CMD_MKENT(sink_mode, 1, 1, do_sink_mode, "", ""),
+ };
+ 
+ static int do_hdmitx(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
+@@ -421,6 +479,9 @@ U_BOOT_CMD(hdmitx, CONFIG_SYS_MAXARGS, 0, do_hdmitx,
+ 	"    Detect hdmi rx plug-in\n"
+ 	"hdmitx get_preferred_mode\n"
+ 	"    Read full edid data, parse edid, and get preferred mode\n"
++	"hdmitx sink_mode\n"
++	"    Read and parse edid; if the sink does not take outputmode, set\n"
++	"    outputmode and hdmimode to its native mode (not saved)\n"
+ #if 0
+ 	"hdmitx edid read ADDRESS\n"
+ 	"    Read hdmi rx edid from ADDRESS(0x00~0xff)\n"
+diff --git a/common/hdmi_edid_parsing.c b/common/hdmi_edid_parsing.c
+index 4444238..e1e055c 100644
+--- a/common/hdmi_edid_parsing.c
++++ b/common/hdmi_edid_parsing.c
+@@ -318,7 +318,9 @@ static void Edid_ParsingVendSpec(struct rx_cap *pRXCap,
+ 		pr_info("hdmitx: edid: maybe invalid dv%d data\n", dv->ver);
+ }
+ 
+-static void Edid_DTD_parsing(struct rx_cap *pRXCap, unsigned char *data)
++/* returns our mode of the timing, or NULL */
++static struct hdmi_format_para *Edid_DTD_parsing(struct rx_cap *pRXCap,
++	unsigned char *data)
+ {
+ 	struct hdmi_format_para *para = NULL;
+ 	struct dtd *t = &pRXCap->dtd[pRXCap->dtd_idx];
+@@ -367,6 +369,7 @@ next:
+ 		pRXCap->dtd_idx++;
+ 	} else
+ 		dump_dtd_info(t);
++	return para;
+ }
+ 
+ /* parse Sink 4k2k information */
+@@ -655,6 +658,222 @@ case_next:
+ 	return 0;
+ }
+ 
++/*
++ * PC monitors (VESA modes), as in the kernel (hdmi_tx_edid.c, port patches
++ * 0011/0012): the VESA modes a sink lists in block 0 (established timings,
++ * standard timings, Established Timings III, detailed timings), its display
++ * range limits and its first detailed timing (the native mode).
++ */
++static void store_vesa(struct rx_cap *pRXCap, enum hdmi_vic vic)
++{
++	int i;
++
++	for (i = 0; i < VESA_MAX_TIMING; i++) {
++		if (pRXCap->vesa_timing[i] == vic)
++			return;
++		if (pRXCap->vesa_timing[i] == HDMI_unkown) {
++			pRXCap->vesa_timing[i] = vic;
++			return;
++		}
++	}
++}
++
++/* established timings I and II (block 0 bytes 0x23, 0x24): the 60 Hz modes */
++static void edid_established_timings(struct rx_cap *pRXCap, unsigned char *d)
++{
++	if (d[0] & (1 << 5))
++		store_vesa(pRXCap, HDMIV_640x480p60hz);
++	if (d[0] & (1 << 0))
++		store_vesa(pRXCap, HDMIV_800x600p60hz);
++	if (d[1] & (1 << 3))
++		store_vesa(pRXCap, HDMIV_1024x768p60hz);
++}
++
++/* standard timing identifiers, 2 bytes each (VESA E-EDID 1.4 3.9) */
++static void edid_standard_timings(struct rx_cap *pRXCap, unsigned char *d,
++	int n)
++{
++	struct hdmi_format_para *para;
++	unsigned int h, v;
++
++	for (; n > 0; n--, d += 2) {
++		if (d[0] <= 1 && d[1] <= 1)	/* unused (01 01) */
++			continue;
++		h = (d[0] + 31) * 8;
++		switch (d[1] >> 6) {
++		case 0:
++			v = h * 10 / 16;	/* 16:10 */
++			break;
++		case 1:
++			v = h * 3 / 4;
++			break;
++		case 2:
++			v = h * 4 / 5;
++			break;
++		default:
++			v = h * 9 / 16;
++			break;
++		}
++		para = hdmi_get_vesa_paras(h, v, (d[1] & 0x3f) + 60);
++		if (para)
++			store_vesa(pRXCap, para->vic);
++	}
++}
++
++/* Established Timings III (VESA E-EDID 1.4 table 3.29): the DMT modes
++ * without reduced blanking
++ */
++static void edid_established_timings_3(struct rx_cap *pRXCap,
++	unsigned char *d)
++{
++	static const struct {
++		unsigned char byte, bit;
++		enum hdmi_vic vic;
++	} et3[] = {
++		{0, 0, HDMIV_1152x864p75hz},
++		{1, 6, HDMIV_1280x768p60hz},
++		{1, 3, HDMIV_1280x960p60hz},
++		{1, 1, HDMIV_1280x1024p60hz},
++		{2, 7, HDMIV_1360x768p60hz},
++		{2, 5, HDMIV_1440x900p60hz},
++		{2, 1, HDMIV_1400x1050p60hz},
++		{3, 5, HDMIV_1680x1050p60hz},
++		{3, 2, HDMIV_1600x1200p60hz},
++		{4, 0, HDMIV_1920x1200p60hz},
++	};
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(et3); i++)
++		if (d[et3[i].byte] & (1 << et3[i].bit))
++			store_vesa(pRXCap, et3[i].vic);
++}
++
++/* display descriptor (a detailed timing slot with pixel clock 0) */
++static void edid_display_descriptor(struct rx_cap *pRXCap, unsigned char *d)
++{
++	switch (d[3]) {
++	case TAG_RANGE_LIMITS:
++		/* max pixel clock, in 10 MHz */
++		pRXCap->range_max_pclk = d[9] * 10000;
++		break;
++	case TAG_STANDARD_TIMINGS:
++		edid_standard_timings(pRXCap, &d[5], 6);
++		break;
++	case TAG_ESTABLISHED_TIMING_III:
++		edid_established_timings_3(pRXCap, &d[6]);
++		break;
++	default:
++		break;
++	}
++}
++
++/* the first detailed timing: the sink's native mode */
++static void edid_pmt(struct rx_cap *pRXCap, unsigned char *d,
++	struct hdmi_format_para *para)
++{
++	unsigned int h, v, total;
++
++	if (para) {
++		if (para->vic >= HDMITX_VESA_OFFSET)
++			pRXCap->pmt_vesa_vic = para->vic;
++		return;
++	}
++	if (d[17] & 0x80)	/* interlaced */
++		return;
++	h = d[2] + ((d[4] >> 4) << 8);
++	v = d[5] + ((d[7] >> 4) << 8);
++	total = (h + d[3] + ((d[4] & 0xf) << 8)) *
++		(v + d[6] + ((d[7] & 0xf) << 8));
++	if (!h || !v || !total)
++		return;
++	pRXCap->pmt_hactive = h;
++	pRXCap->pmt_vactive = v;
++	/* pixel clock in 10 kHz */
++	pRXCap->pmt_hz = ((d[0] + (d[1] << 8)) * 10000 + total / 2) / total;
++}
++
++int hdmitx_edid_mode_supported(struct rx_cap *pRXCap, enum hdmi_vic vic,
++	int y420)
++{
++	struct hdmi_format_para *para = hdmi_get_fmt_paras(vic);
++	unsigned int i;
++
++	if (vic == HDMI_unkown || !para)
++		return 0;
++	if (!pRXCap->edid_valid)	/* nothing known against the mode */
++		return 1;
++	/* faster than the sink's range limits: not shown, even if listed (an
++	 * HDMI-VGA adapter lists 1080p for any monitor); HDMI 2.x sinks
++	 * (HF-VSDB) are trusted as they are
++	 */
++	if (pRXCap->range_max_pclk && !pRXCap->Max_TMDS_Clock2 &&
++	    para->timing.pixel_freq > pRXCap->range_max_pclk)
++		return 0;
++	if (vic >= HDMITX_VESA_OFFSET) {
++		for (i = 0; i < VESA_MAX_TIMING && pRXCap->vesa_timing[i]; i++)
++			if (pRXCap->vesa_timing[i] == vic)
++				return 1;
++		return 0;
++	}
++	for (i = 0; i < pRXCap->VIC_count; i++)
++		if (pRXCap->VIC[i] == vic ||
++		    (y420 && pRXCap->VIC[i] == HDMITX_VIC420_OFFSET + vic))
++			return 1;
++	for (i = 0; i < pRXCap->dtd_idx; i++)
++		if (pRXCap->dtd[i].vic == vic)
++			return 1;
++	return 0;
++}
++
++/*
++ * The mode for a sink that does not take the configured one: a monitor's
++ * first detailed timing (or our listed VESA mode of its size and rate), else
++ * the preferred CEA mode, else the first listed one, else the largest listed
++ * VESA mode. HDMI_unkown without a valid EDID.
++ */
++enum hdmi_vic hdmitx_edid_native_mode(struct rx_cap *pRXCap)
++{
++	struct hdmi_format_para *para;
++	enum hdmi_vic best = HDMI_unkown;
++	unsigned int i, area = 0;
++
++	if (!pRXCap->edid_valid)
++		return HDMI_unkown;
++	if (pRXCap->pmt_vesa_vic &&
++	    hdmitx_edid_mode_supported(pRXCap, pRXCap->pmt_vesa_vic, 0))
++		return pRXCap->pmt_vesa_vic;
++	for (i = 0; pRXCap->pmt_hz && i < VESA_MAX_TIMING &&
++	     pRXCap->vesa_timing[i]; i++) {
++		para = hdmi_get_fmt_paras(pRXCap->vesa_timing[i]);
++		if (para && para->timing.h_active == pRXCap->pmt_hactive &&
++		    para->timing.v_active == pRXCap->pmt_vactive &&
++		    (para->timing.v_freq + 500) / 1000 == pRXCap->pmt_hz &&
++		    hdmitx_edid_mode_supported(pRXCap, para->vic, 0))
++			return para->vic;
++	}
++	if (pRXCap->preferred_mode &&
++	    hdmitx_edid_mode_supported(pRXCap, pRXCap->preferred_mode, 0))
++		return pRXCap->preferred_mode;
++	for (i = 0; i < pRXCap->VIC_count; i++)
++		if (hdmitx_edid_mode_supported(pRXCap, pRXCap->VIC[i], 0))
++			return pRXCap->VIC[i];
++	for (i = 0; i < VESA_MAX_TIMING && pRXCap->vesa_timing[i]; i++) {
++		para = hdmi_get_fmt_paras(pRXCap->vesa_timing[i]);
++		if (para && hdmitx_edid_mode_supported(pRXCap, para->vic, 0) &&
++		    para->timing.h_active * para->timing.v_active > area) {
++			area = para->timing.h_active * para->timing.v_active;
++			best = para->vic;
++		}
++	}
++	return best;
++}
++
++/* a DVI sink: no HDMI VSDB (as the kernel decides) */
++int hdmitx_edid_is_dvi(struct rx_cap *pRXCap)
++{
++	return pRXCap->edid_valid && pRXCap->IEEEOUI != 0x000c03;
++}
++
+ /*
+  * Parsing RAW EDID data from edid to pRXCap
+  */
+@@ -676,9 +895,22 @@ unsigned int hdmi_edid_parsing(unsigned char *EDID_buf, struct rx_cap *pRXCap)
+ 	idx[1] = EDID_DETAILED_TIMING_DES_BLOCK1_POS;
+ 	idx[2] = EDID_DETAILED_TIMING_DES_BLOCK2_POS;
+ 	idx[3] = EDID_DETAILED_TIMING_DES_BLOCK3_POS;
++	edid_established_timings(pRXCap, &EDID_buf[0x23]);
++	edid_standard_timings(pRXCap, &EDID_buf[0x26], 8);
+ 	for (i = 0; i < 4; i++) {
+-		if ((EDID_buf[idx[i]]) && (EDID_buf[idx[i] + 1]))
+-			Edid_DTD_parsing(pRXCap, &EDID_buf[idx[i]]);
++		unsigned char *d = &EDID_buf[idx[i]];
++		struct hdmi_format_para *para;
++
++		/* pixel clock 0: a display descriptor */
++		if (!d[0] && !d[1]) {
++			edid_display_descriptor(pRXCap, d);
++			continue;
++		}
++		para = Edid_DTD_parsing(pRXCap, d);
++		if (para && para->vic >= HDMITX_VESA_OFFSET)
++			store_vesa(pRXCap, para->vic);
++		if (i == 0)
++			edid_pmt(pRXCap, d, para);
+ 	}
+ 
+ 	if (BlockCount == 1)
+@@ -697,12 +929,14 @@ unsigned int hdmi_edid_parsing(unsigned char *EDID_buf, struct rx_cap *pRXCap)
+  * DTDs defining Native Video Formats in the whole EDID is zero, the first
+  * SVD shall take precedence.
+  */
+-	if (!pRXCap->flag_vfpdb && (pRXCap->preferred_mode != pRXCap->VIC[0]) &&
++	if (!pRXCap->flag_vfpdb && pRXCap->VIC_count &&
++		(pRXCap->preferred_mode != pRXCap->VIC[0]) &&
+ 		(pRXCap->number_of_dtd == 0)) {
+ 		pr_info("hdmitx: edid: change preferred_mode from %d to %d\n",
+ 			pRXCap->preferred_mode,	pRXCap->VIC[0]);
+ 		pRXCap->preferred_mode = pRXCap->VIC[0];
+ 	}
+ 
++	pRXCap->edid_valid = 1;
+ 	return 1;
+ }
+diff --git a/common/hdmi_parameters.c b/common/hdmi_parameters.c
+index 09bbb44..63fb776 100644
+--- a/common/hdmi_parameters.c
++++ b/common/hdmi_parameters.c
+@@ -1104,7 +1104,7 @@ static struct hdmi_format_para fmt_para_vesa_640x480p60_4x3 = {
+ 	.tmds_clk = 25175,
+ 	.timing = {
+ 		.pixel_freq = 25175,
+-		.h_freq = 26218,
++		.h_freq = 31469,
+ 		.v_freq = 59940,
+ 		.vsync_polarity = 0,
+ 		.hsync_polarity = 0,
+@@ -1165,7 +1165,7 @@ static struct hdmi_format_para fmt_para_vesa_800x600p60_4x3 = {
+ 	.tmds_clk_div40 = 0,
+ 	.tmds_clk = 40000,
+ 	.timing = {
+-		.pixel_freq = 66666,
++		.pixel_freq = 40000,
+ 		.h_freq = 37879,
+ 		.v_freq = 60317,
+ 		.vsync_polarity = 1,
+@@ -1287,13 +1287,13 @@ static struct hdmi_format_para fmt_para_vesa_1024x768p60_4x3 = {
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 79500,
++	.tmds_clk = 65000,
+ 	.timing = {
+-		.pixel_freq = 79500,
+-		.h_freq = 48360,
++		.pixel_freq = 65000,
++		.h_freq = 48363,
+ 		.v_freq = 60004,
+-		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.vsync_polarity = 0,
++		.hsync_polarity = 0,
+ 		.h_active = 1024,
+ 		.h_total = 1344,
+ 		.h_blank = 320,
+@@ -1386,7 +1386,7 @@ static struct hdmi_format_para fmt_para_vesa_1280x768p60_5x3 = {
+ 		.h_freq = 47776,
+ 		.v_freq = 59870,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1280,
+ 		.h_total = 1664,
+ 		.h_blank = 384,
+@@ -1413,22 +1413,22 @@ static struct hdmi_format_para fmt_para_vesa_1280x800p60_8x5 = {
+ 	.tmds_clk = 83500,
+ 	.timing = {
+ 		.pixel_freq = 83500,
+-		.h_freq = 49380,
+-		.v_freq = 59910,
++		.h_freq = 49702,
++		.v_freq = 59810,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1280,
+-		.h_total = 1440,
+-		.h_blank = 160,
+-		.h_front = 48,
+-		.h_sync = 32,
+-		.h_back = 80,
++		.h_total = 1680,
++		.h_blank = 400,
++		.h_front = 72,
++		.h_sync = 128,
++		.h_back = 200,
+ 		.v_active = 800,
+-		.v_total = 823,
+-		.v_blank = 23,
++		.v_total = 831,
++		.v_blank = 31,
+ 		.v_front = 3,
+ 		.v_sync = 6,
+-		.v_back = 14,
++		.v_back = 22,
+ 		.v_sync_ln = 1,
+ 	},
+ };
+@@ -1449,7 +1449,7 @@ static struct hdmi_format_para fmt_para_vesa_1280x960p60_4x3 = {
+ 		.vsync_polarity = 1,
+ 		.hsync_polarity = 1,
+ 		.h_active = 1280,
+-		.h_total = 1440,
++		.h_total = 1800,
+ 		.h_blank = 520,
+ 		.h_front = 96,
+ 		.h_sync = 112,
+@@ -1474,7 +1474,7 @@ static struct hdmi_format_para fmt_para_vesa_1280x1024p60_5x4 = {
+ 	.tmds_clk = 108000,
+ 	.timing = {
+ 		.pixel_freq = 108000,
+-		.h_freq = 64080,
++		.h_freq = 63981,
+ 		.v_freq = 60020,
+ 		.vsync_polarity = 1,
+ 		.hsync_polarity = 1,
+@@ -1502,10 +1502,10 @@ static struct hdmi_format_para fmt_para_vesa_1360x768p60_16x9 = {
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 855000,
++	.tmds_clk = 85500,
+ 	.timing = {
+-		.pixel_freq = 855000,
+-		.h_freq = 47700,
++		.pixel_freq = 85500,
++		.h_freq = 47712,
+ 		.v_freq = 60015,
+ 		.vsync_polarity = 1,
+ 		.hsync_polarity = 1,
+@@ -1536,7 +1536,7 @@ static struct hdmi_format_para fmt_para_vesa_1366x768p60_16x9 = {
+ 	.tmds_clk = 85500,
+ 	.timing = {
+ 		.pixel_freq = 85500,
+-		.h_freq = 47880,
++		.h_freq = 47712,
+ 		.v_freq = 59790,
+ 		.vsync_polarity = 1,
+ 		.hsync_polarity = 1,
+@@ -1570,7 +1570,7 @@ static struct hdmi_format_para fmt_para_vesa_1400x1050p60_4x3 = {
+ 		.h_freq = 65317,
+ 		.v_freq = 59978,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1400,
+ 		.h_total = 1864,
+ 		.h_blank = 464,
+@@ -1598,10 +1598,10 @@ static struct hdmi_format_para fmt_para_vesa_1440x900p60_8x5 = {
+ 	.tmds_clk = 106500,
+ 	.timing = {
+ 		.pixel_freq = 106500,
+-		.h_freq = 56040,
++		.h_freq = 55935,
+ 		.v_freq = 59887,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1440,
+ 		.h_total = 1904,
+ 		.h_blank = 464,
+@@ -1753,10 +1753,10 @@ static struct hdmi_format_para fmt_para_vesa_1680x1050p60_8x5 = {
+ 	.tmds_clk = 146250,
+ 	.timing = {
+ 		.pixel_freq = 146250,
+-		.h_freq = 65340,
++		.h_freq = 65290,
+ 		.v_freq = 59954,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1680,
+ 		.h_total = 2240,
+ 		.h_blank = 560,
+@@ -1784,10 +1784,10 @@ static struct hdmi_format_para fmt_para_vesa_1920x1200p60_8x5 = {
+ 	.tmds_clk = 193250,
+ 	.timing = {
+ 		.pixel_freq = 193250,
+-		.h_freq = 74700,
++		.h_freq = 74556,
+ 		.v_freq = 59885,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1920,
+ 		.h_total = 2592,
+ 		.h_blank = 672,
+@@ -1834,68 +1834,67 @@ static struct hdmi_format_para fmt_para_vesa_2160x1200p90_9x5 = {
+ 	},
+ };
+ 
++/* CEA-861 VIC 90 (as in the kernel), also the usual mode of 64:27 monitors */
+ static struct hdmi_format_para fmt_para_vesa_2560x1080p60_64x27 = {
+-#if 0 /* TODO */
+-	.vic = HDMIV_2560x1080p60hz,
++	.vic = HDMI_2560x1080p60_64x27,
+ 	.name = "2560x1080p60hz",
++	.sname = "2560x1080p60hz",
+ 	.pixel_repetition_factor = 0,
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 193250,
++	.tmds_clk = 198000,
+ 	.timing = {
+-		.pixel_freq = 193250,
+-		.h_freq = 74700,
++		.pixel_freq = 198000,
++		.h_freq = 66000,
+ 		.v_freq = 60000,
+ 		.vsync_polarity = 1,
+ 		.hsync_polarity = 1,
+-		.h_active = 1920,
+-		.h_total = 2592,
+-		.h_blank = 672,
+-		.h_front = 136,
+-		.h_sync = 200,
+-		.h_back = 336,
+-		.v_active = 1200,
+-		.v_total = 1245,
+-		.v_blank = 45,
+-		.v_front = 3,
+-		.v_sync = 6,
+-		.v_back = 36,
++		.h_active = 2560,
++		.h_total = 3000,
++		.h_blank = 440,
++		.h_front = 248,
++		.h_sync = 44,
++		.h_back = 148,
++		.v_active = 1080,
++		.v_total = 1100,
++		.v_blank = 20,
++		.v_front = 4,
++		.v_sync = 5,
++		.v_back = 11,
+ 		.v_sync_ln = 1,
+ 	},
+-#endif
+ };
+ 
+ static struct hdmi_format_para fmt_para_vesa_2560x1440p60_16x9 = {
+-#if 0 /* TODO */
+ 	.vic = HDMIV_2560x1440p60hz,
+ 	.name = "2560x1440p60hz",
++	.sname = "2560x1440p60hz",
+ 	.pixel_repetition_factor = 0,
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 193250,
++	.tmds_clk = 241500,
+ 	.timing = {
+-		.pixel_freq = 193250,
+-		.h_freq = 74700,
+-		.v_freq = 60000,
+-		.vsync_polarity = 1,
++		.pixel_freq = 241500,
++		.h_freq = 88787,
++		.v_freq = 59951,
++		.vsync_polarity = 0,
+ 		.hsync_polarity = 1,
+-		.h_active = 1920,
+-		.h_total = 2592,
+-		.h_blank = 672,
+-		.h_front = 136,
+-		.h_sync = 200,
+-		.h_back = 336,
+-		.v_active = 1200,
+-		.v_total = 1245,
+-		.v_blank = 45,
++		.h_active = 2560,
++		.h_total = 2720,
++		.h_blank = 160,
++		.h_front = 48,
++		.h_sync = 32,
++		.h_back = 80,
++		.v_active = 1440,
++		.v_total = 1481,
++		.v_blank = 41,
+ 		.v_front = 3,
+-		.v_sync = 6,
+-		.v_back = 36,
++		.v_sync = 5,
++		.v_back = 33,
+ 		.v_sync_ln = 1,
+ 	},
+-#endif
+ };
+ 
+ static struct hdmi_format_para fmt_para_vesa_2560x1600p60_8x5 = {
+@@ -1912,7 +1911,7 @@ static struct hdmi_format_para fmt_para_vesa_2560x1600p60_8x5 = {
+ 		.h_freq = 99458,
+ 		.v_freq = 59987,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 2560,
+ 		.h_total = 3504,
+ 		.h_blank = 944,
+@@ -2156,3 +2155,21 @@ struct hdmi_format_para *hdmi_match_dtd_paras(struct dtd *t)
+ 
+ 	return NULL;
+ }
++
++/* the VESA mode of the given size and refresh rate (EDID standard timings) */
++struct hdmi_format_para *hdmi_get_vesa_paras(unsigned int h_active,
++	unsigned int v_active, unsigned int hz)
++{
++	struct hdmi_format_para *p;
++	int i;
++
++	for (i = 0; all_fmt_paras[i]; i++) {
++		p = all_fmt_paras[i];
++		if (p->vic >= HDMITX_VESA_OFFSET &&
++		    p->timing.h_active == h_active &&
++		    p->timing.v_active == v_active &&
++		    (p->timing.v_freq + 500) / 1000 == hz)
++			return p;
++	}
++	return NULL;
++}
+diff --git a/drivers/display/vout/vout.c b/drivers/display/vout/vout.c
+index f56249e..d1fab5e 100644
+--- a/drivers/display/vout/vout.c
++++ b/drivers/display/vout/vout.c
+@@ -189,144 +189,175 @@ static const vout_set_t vout_sets[] = {
+ 		.mode              = VMODE_640x480p60hz,
+ 		.width             = 640,
+ 		.height            = 480,
++		.field_height      = 480,
+ 	},
+ 	{ /* VMODE_800x480p60hz */
+ 		.name              = "800x480p60hz",
+ 		.mode              = VMODE_800x480p60hz,
+ 		.width             = 800,
+ 		.height            = 480,
++		.field_height      = 480,
+ 	},
+ 	{ /* VMODE_800x600p60hz */
+ 		.name              = "800x600p60hz",
+ 		.mode              = VMODE_800x600p60hz,
+ 		.width             = 800,
+ 		.height            = 600,
++		.field_height      = 600,
+ 	},
+ 	{ /* VMODE_852x480p60hz */
+ 		.name              = "852x480p60hz",
+ 		.mode              = VMODE_852x480p60hz,
+ 		.width             = 852,
+ 		.height            = 480,
++		.field_height      = 480,
+ 	},
+ 	{ /* VMODE_854x480p60hz */
+ 		.name              = "854x480p60hz",
+ 		.mode              = VMODE_854x480p60hz,
+ 		.width             = 854,
+ 		.height            = 480,
++		.field_height      = 480,
+ 	},
+ 	{ /* VMODE_1024x768p60hz */
+ 		.name              = "1024x768p60hz",
+ 		.mode              = VMODE_1024x768p60hz,
+ 		.width             = 1024,
+ 		.height            = 768,
++		.field_height      = 768,
+ 	},
+ 	{ /* VMODE_1152x864p75hz */
+ 		.name              = "1152x864p75hz",
+ 		.mode              = VMODE_1152x864p75hz,
+ 		.width             = 1152,
+ 		.height            = 864,
++		.field_height      = 864,
+ 	},
+ 	{ /* VMODE_1280x600p60hz */
+ 		.name              = "1280x600p60hz",
+ 		.mode              = VMODE_1280x600p60hz,
+ 		.width             = 1280,
+ 		.height            = 600,
++		.field_height      = 600,
+ 	},
+ 	{ /* VMODE_1280x768p60hz */
+ 		.name              = "1280x768p60hz",
+ 		.mode              = VMODE_1280x768p60hz,
+ 		.width             = 1280,
+ 		.height            = 768,
++		.field_height      = 768,
+ 	},
+ 	{ /* VMODE_1280x800p60hz */
+ 		.name              = "1280x800p60hz",
+ 		.mode              = VMODE_1280x800p60hz,
+ 		.width             = 1280,
+ 		.height            = 800,
++		.field_height      = 800,
+ 	},
+ 	{ /* VMODE_1280x960p60hz */
+ 		.name              = "1280x960p60hz",
+ 		.mode              = VMODE_1280x960p60hz,
+ 		.width             = 1280,
+ 		.height            = 960,
++		.field_height      = 960,
+ 	},
+ 	{ /* VMODE_1280x1024p60hz */
+ 		.name              = "1280x1024p60hz",
+ 		.mode              = VMODE_1280x1024p60hz,
+ 		.width             = 1280,
+ 		.height            = 1024,
++		.field_height      = 1024,
+ 	},
+ 	{ /* VMODE_1360x768p60hz */
+ 		.name              = "1360x768p60hz",
+ 		.mode              = VMODE_1360x768p60hz,
+ 		.width             = 1360,
+ 		.height            = 768,
++		.field_height      = 768,
+ 	},
+ 	{ /* VMODE_1366x768p60hz */
+ 		.name              = "1366x768p60hz",
+ 		.mode              = VMODE_1366x768p60hz,
+ 		.width             = 1366,
+ 		.height            = 768,
++		.field_height      = 768,
+ 	},
+ 	{ /* VMODE_1400x1050p60hz */
+ 		.name              = "1400x1050p60hz",
+ 		.mode              = VMODE_1400x1050p60hz,
+ 		.width             = 1400,
+ 		.height            = 1050,
++		.field_height      = 1050,
+ 	},
+ 	{ /* VMODE_1440x900p60hz */
+ 		.name              = "1440x900p60hz",
+ 		.mode              = VMODE_1440x900p60hz,
+ 		.width             = 1440,
+ 		.height            = 900,
++		.field_height      = 900,
+ 	},
+ 	{ /* VMODE_1440x2560p60hz */
+ 		.name              = "1440x2560p60hz",
+ 		.mode              = VMODE_1440x2560p60hz,
+ 		.width             = 1440,
+ 		.height            = 2560,
++		.field_height      = 2560,
+ 	},
+ 	{ /* VMODE_1440x2560p70hz */
+ 		.name              = "1440x2560p70hz",
+ 		.mode              = VMODE_1440x2560p70hz,
+ 		.width             = 1440,
+ 		.height            = 2560,
++		.field_height      = 2560,
+ 	},
+ 	{ /* VMODE_1600x900p60hz */
+ 		.name              = "1600x900p60hz",
+ 		.mode              = VMODE_1600x900p60hz,
+ 		.width             = 1600,
+ 		.height            = 900,
++		.field_height      = 900,
+ 	},
+ 	{ /* VMODE_1600x1200p60hz */
+ 		.name              = "1600x1200p60hz",
+ 		.mode              = VMODE_1600x1200p60hz,
+ 		.width             = 1600,
+ 		.height            = 1200,
++		.field_height      = 1200,
+ 	},
+ 	{ /* VMODE_1680x1050p60hz */
+ 		.name              = "1680x1050p60hz",
+ 		.mode              = VMODE_1680x1050p60hz,
+ 		.width             = 1680,
+ 		.height            = 1050,
++		.field_height      = 1050,
+ 	},
+ 	{ /* VMODE_1920x1200p60hz */
+ 		.name              = "1920x1200p60hz",
+ 		.mode              = VMODE_1920x1200p60hz,
+ 		.width             = 1920,
+ 		.height            = 1200,
++		.field_height      = 1200,
+ 	},
+ 	{ /* VMODE_2160x1200p90hz */
+ 		.name			= "2160x1200p90hz",
+ 		.mode	 		= VMODE_2160x1200p90hz,
+ 		.width	 		= 2160,
+ 		.height 		= 1200,
++		.field_height      = 1200,
+ 	},
+ 	{ /* VMODE_2560x1080p60hz */
+ 		.name              = "2560x1080p60hz",
+ 		.mode              = VMODE_2560x1080p60hz,
+ 		.width             = 2560,
+ 		.height            = 1080,
++		.field_height      = 1080,
++	},
++	{ /* VMODE_2560x1440p60hz */
++		.name              = "2560x1440p60hz",
++		.mode              = VMODE_2560x1440p60hz,
++		.width             = 2560,
++		.height            = 1440,
++		.field_height      = 1440,
+ 	},
+ };
+ 
+@@ -564,10 +595,36 @@ static int get_window_axis(int *axis)
+ 		axis[2] = getenv_int("panel_w", def_w);
+ 		axis[3] = getenv_int("panel_h", def_h);
+ 	} else {
+-		axis[0] = getenv_int("1080p_x", def_x);
+-		axis[1] = getenv_int("1080p_y", def_y);
+-		axis[2] = getenv_int("1080p_w", def_w);
+-		axis[3] = getenv_int("1080p_h", def_h);
++		/* PC monitor (VESA) modes: the position Android's systemcontrol keeps for the mode
++		 * (<mode>_x/_y/_w/_h), by default the whole screen; the OSD picture (the boot logo
++		 * or menu, display_width x display_height) keeps its aspect ratio inside it, e.g.
++		 * 1920x1080 on a 1280x1024 monitor: 1280x720 with borders above and below
++		 */
++		char key[48];
++		int fb_w = getenv_int("display_width", 1920);
++		int fb_h = getenv_int("display_height", 1080);
++
++		snprintf(key, sizeof(key), "%s_x", mode);
++		axis[0] = getenv_int(key, def_x);
++		snprintf(key, sizeof(key), "%s_y", mode);
++		axis[1] = getenv_int(key, def_y);
++		snprintf(key, sizeof(key), "%s_w", mode);
++		axis[2] = getenv_int(key, def_w);
++		snprintf(key, sizeof(key), "%s_h", mode);
++		axis[3] = getenv_int(key, def_h);
++		if (fb_w > 0 && fb_h > 0 && axis[2] > 0 && axis[3] > 0) {
++			if (axis[2] * fb_h > axis[3] * fb_w) {	/* window wider: side borders */
++				int w = axis[3] * fb_w / fb_h;
++
++				axis[0] += (axis[2] - w) / 2;
++				axis[2] = w;
++			} else {				/* window taller: top/bottom */
++				int h = axis[2] * fb_h / fb_w;
++
++				axis[1] += (axis[3] - h) / 2;
++				axis[3] = h;
++			}
++		}
+ 	}
+ 
+ 	return ret;
+diff --git a/include/amlogic/hdmi.h b/include/amlogic/hdmi.h
+index 828c0b3..1adb039 100644
+--- a/include/amlogic/hdmi.h
++++ b/include/amlogic/hdmi.h
+@@ -29,7 +29,7 @@ enum scdc_addr {
+ };
+ 
+ #define HDMITX_VIC420_OFFSET	0x100
+-#define HDMITX_VESA_OFFSET	0x300
++#define HDMITX_VESA_OFFSET	0x301	/* as in the kernel (hdmi_common.h) */
+ 
+ /* HDMI VIC definitions */
+ enum hdmi_vic {
+@@ -162,8 +162,12 @@ enum hdmi_vic {
+ 		HDMITX_VIC420_OFFSET + HDMI_3840x2160p50_64x27,
+ 	HDMI_3840x2160p60_64x27_Y420 =
+ 		HDMITX_VIC420_OFFSET + HDMI_3840x2160p60_64x27,
++	/* the same numbers as in the kernel (hdmi_common.h): U-Boot hands the
++	 * output mode over to the kernel by number (ISA_DEBUG_REG0)
++	 */
+ 	HDMIV_640x480p60hz = HDMITX_VESA_OFFSET,
+ 	HDMIV_800x480p60hz,
++	HDMIV_1280x480p60hz,
+ 	HDMIV_800x600p60hz,
+ 	HDMIV_852x480p60hz,
+ 	HDMIV_854x480p60hz,
+@@ -180,7 +184,6 @@ enum hdmi_vic {
+ 	HDMIV_1400x1050p60hz,
+ 	HDMIV_1440x900p60hz,
+ 	HDMIV_1440x2560p60hz,
+-	HDMIV_1440x2560p70hz,
+ 	HDMIV_1600x900p60hz,
+ 	HDMIV_1600x1200p60hz,
+ 	HDMIV_1680x1050p60hz,
+@@ -190,6 +193,9 @@ enum hdmi_vic {
+ 	HDMIV_2560x1440p60hz,
+ 	HDMIV_2560x1600p60hz,
+ 	HDMIV_3440x1440p60hz,
++	HDMIV_480x320p60hz,
++	/* U-Boot only (not in the kernel, not offered as an output mode) */
++	HDMIV_1440x2560p70hz,
+ };
+ 
+ /* CEA TIMING STRUCT DEFINITION */
+@@ -414,6 +420,7 @@ struct dv_vsif_para {
+ };
+ 
+ #define VIC_MAX_NUM 256
++#define VESA_MAX_TIMING 64
+ struct rx_cap {
+ 	unsigned int native_Mode;
+ 	/*video*/
+@@ -458,6 +465,19 @@ struct rx_cap {
+ 	struct hdr10_plus_info hdr10plus_info;
+ 	/*blk0 check sum*/
+ 	unsigned char chksum;
++	/* set by hdmi_edid_parsing() for a valid EDID */
++	unsigned char edid_valid;
++	/* PC monitors: the VESA modes the sink lists (established, standard
++	 * and detailed timings), as in the kernel's rxcap.vesa_timing
++	 */
++	enum hdmi_vic vesa_timing[VESA_MAX_TIMING];
++	/* max pixel clock of the display range limits descriptor, kHz; 0: none */
++	unsigned int range_max_pclk;
++	/* the first detailed timing (the sink's native mode): our VESA mode of
++	 * it, or its size and refresh rate when it is none of our modes
++	 */
++	enum hdmi_vic pmt_vesa_vic;
++	unsigned int pmt_hactive, pmt_vactive, pmt_hz;
+ };
+ 
+ enum hdmi_color_depth {
+@@ -561,6 +581,13 @@ int hdmi_outputmode_check(char *mode);
+ /* Parsing RAW EDID data from edid to pRXCap */
+ unsigned int hdmi_edid_parsing(unsigned char *edid, struct rx_cap *pRXCap);
+ struct hdmi_format_para *hdmi_match_dtd_paras(struct dtd *t);
++struct hdmi_format_para *hdmi_get_vesa_paras(unsigned int h_active,
++	unsigned int v_active, unsigned int hz);
++/* sink capabilities (from a parsed EDID; without one, everything is allowed) */
++int hdmitx_edid_mode_supported(struct rx_cap *pRXCap, enum hdmi_vic vic,
++	int y420);
++enum hdmi_vic hdmitx_edid_native_mode(struct rx_cap *pRXCap);
++int hdmitx_edid_is_dvi(struct rx_cap *pRXCap);
+ void hdmitx_set_drm_pkt(struct master_display_info_s *data);
+ void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type tunnel_mode,
+ 	struct dv_vsif_para *data);

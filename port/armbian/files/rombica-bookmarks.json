@@ -1,0 +1,7 @@
+{
+  "BookmarkBarEnabled": true,
+  "ManagedBookmarks": [
+    { "toplevel_name": "Rombica" },
+    { "name": "▶ HW (YouTube: аппаратный плеер)", "url": "javascript:(()=>{document.querySelectorAll('video').forEach(v=>v.pause());location.href='ytplay:'+location.href})()" }
+  ]
+}

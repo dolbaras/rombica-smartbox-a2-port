@@ -1,0 +1,22 @@
+# Rombica SmartBox A2 port: values changed in SlimBOX's /vendor/build.prop (vendor/edit_props.py).
+#
+# Device identity (SlimBOX: Amlogic S905X).
+ro.product.vendor.manufacturer=Rombica
+ro.product.vendor.model=SmartBox A2
+ro.product.vendor.brand=Rombica
+#
+# GPU: Mali-450 MP2, OpenGL ES 2.0 only (SlimBOX says 3.2, 196610: apps that need OpenGL ES 3
+# would be offered and then fail). See also etc/permissions/rombica_gpu.xml.
+ro.opengles.version=131072
+#
+# Amlogic "app optimization" off. With it on, com.droidlogic's Optimization service polls the
+# running processes and the top activity every 50 ms and hands them to systemcontrol, which
+# (liboptimization.so, /vendor/package_config/config) switches the thermal zones OFF, pins the
+# CPU frequency and forces GPU modes while a benchmark, CTS app or Netflix is in front. Thermal
+# protection must stay on (the box has a small heatsink), and the polling costs CPU all the time
+# (com.droidlogic ~4 % of a core, plus system_server and systemcontrol).
+ro.vendor.app.optimization=false
+#
+# No Bluetooth on AP6181 (SlimBOX's builds expect AP6212): with it enabled the Bluetooth app
+# crash-loops every ~20 s.
+config.disable_bluetooth=true

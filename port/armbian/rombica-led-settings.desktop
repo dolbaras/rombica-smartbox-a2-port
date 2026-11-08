@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Индикатор
+Name[en]=Front LED
+Comment=Роли синего и красного цвета индикатора: не горит, горит, сердцебиение, активность карты, пульт
+Exec=rombica-led-settings
+Icon=preferences-desktop
+Categories=Settings;HardwareSettings;

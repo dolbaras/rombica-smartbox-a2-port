@@ -1,0 +1,80 @@
+From 4bb3d96a4e961286697cbab31e63bdcc66c6bd6e Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Thu, 1 Oct 2026 20:30:00 +0300
+Subject: [PATCH] vsprintf: drop Amlogic %s-to-symbol substitution
+
+Amlogic's string() printed a symbol name (or a bare "0x..." address) instead
+of the string whenever the pointer fell in [_text, _etext) or the init text.
+On 32-bit ARM the range from _text to _stext is section-alignment padding
+(about 1 MB here) that is not reserved and goes to the page allocator, and
+init text is freed after boot, so ordinary heap strings landing there were
+printed as "0xc013c6c8" instead of their contents.
+
+The eMMC driver builds its pinctrl state name with "%s_all_pins" from the
+platform data, so when that data was allocated in the padding the lookup
+failed ("get pinctrl 0xc013c6c8_all_pins fail"), the data pins were never
+muxed and the first data command (CMD8) timed out: "emmc: error -110 whilst
+initialising MMC card", no root file system. Allocation order differs on a
+warm reboot (HDMI is already plugged), which is why it showed up only after
+reboots from Armbian or recovery. Device and mount option names were mangled
+the same way.
+
+Print the string itself, as upstream does. The other half of the scheme
+goes too: Amlogic's Makefile compiled built-in code with
+-D__func__=__MY_FUNC__, which is the current pc (kernel.h), and relied on
+the substitution to print it as a name; without it every __func__ printed
+code bytes ("hdmitx: |\"\x01\xe3#..."). __func__ is the function name again
+(about 60 KB more rodata); the __FILE__ redefinition stays.
+---
+ Makefile       |  7 +++----
+ lib/vsprintf.c | 12 ------------
+ 2 files changed, 3 insertions(+), 16 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index e61405a3..7c8d20e5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -401,10 +401,9 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+ 		   -Werror \
+ 		   -std=gnu89 $(call cc-option,-fno-PIE)
+ 
+-# re-define of __func__, __file__ to save rodata size
+-AMLOGIC_KFLAGS 	:= -U__func__ -D__func__=__MY_FUNC__ \
+-		   -U__FUNC__ -D__FUNC__=__MY_FUNC__ \
+-		   -U__FILE__ -D__FILE__='"$(subst $(srctree)/,,$(<))"'
++# re-define of __file__ to save rodata size (__func__ stays the function name:
++# Amlogic's "__func__ = current pc" needed its vsprintf %s-to-symbol hack)
++AMLOGIC_KFLAGS 	:= -U__FILE__ -D__FILE__='"$(subst $(srctree)/,,$(<))"'
+ export AMLOGIC_KFLAGS
+ 
+ KBUILD_CPPFLAGS := -D__KERNEL__
+diff --git a/lib/vsprintf.c b/lib/vsprintf.c
+index 3351d13b..18694944 100644
+--- a/lib/vsprintf.c
++++ b/lib/vsprintf.c
+@@ -585,22 +585,10 @@ char *string(char *buf, char *end, const char *s, struct printf_spec spec)
+ {
+ 	int len = 0;
+ 	size_t lim = spec.precision;
+-#ifdef CONFIG_AMLOGIC_MODIFY
+-	char name[KSYM_SYMBOL_LEN];
+-#endif
+ 
+ 	if ((unsigned long)s < PAGE_SIZE)
+ 		s = "(null)";
+ 
+-#ifdef CONFIG_AMLOGIC_MODIFY
+-	if ((s >= _text && s < _etext) ||
+-	    (s >= _sinittext && s < _einittext)) {
+-		/* special replace for __func__ */
+-		sprint_symbol_no_offset(name, (unsigned long)s);
+-		s = name;
+-	}
+-#endif
+-
+ 	while (lim--) {
+ 		char c = *s++;
+ 		if (!c)
+-- 
+2.34.1
+

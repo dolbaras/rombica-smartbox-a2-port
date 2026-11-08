@@ -1,0 +1,198 @@
+From 12a36121d21410f82f40a0d5699c47c3fc7a416c Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 10:04:27 +0300
+Subject: [PATCH 3/5] flutter: show the hardware decoder's texture on mobile
+
+A frame decoded into the video texture reaches the UI as
+EventToUI::Texture (at most once a second, the texture refreshes
+itself). On Android the image model then keeps a never drawn
+placeholder image of the display size, so canvas, scale and mouse work
+as before, and ImagePaint shows a Texture widget at the place and size
+the image would be drawn at (FilterQuality.low: anything higher makes
+Skia copy the external texture and build mipmaps every frame). Rgba
+frames switch back to the image (software decoding after a fallback).
+The remote page creates the texture before connecting and releases it
+on close.
+---
+ flutter/lib/mobile/pages/remote_page.dart | 16 +++++++
+ flutter/lib/models/model.dart             | 53 +++++++++++++++++++++++
+ src/client/io_loop.rs                     |  2 +
+ src/flutter.rs                            | 21 +++++++++
+ src/ui_session_interface.rs               |  3 ++
+ 5 files changed, 95 insertions(+)
+
+diff --git a/flutter/lib/mobile/pages/remote_page.dart b/flutter/lib/mobile/pages/remote_page.dart
+index 8395f45..a9e7abd 100644
+--- a/flutter/lib/mobile/pages/remote_page.dart
++++ b/flutter/lib/mobile/pages/remote_page.dart
+@@ -94,6 +94,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
+   void initState() {
+     super.initState();
+     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
++    // before the first frame, so the hardware decoder can render into it
++    gFFI.imageModel.createSurfaceTexture();
+     gFFI.start(
+       widget.id,
+       password: widget.password,
+@@ -1154,6 +1156,20 @@ class ImagePaint extends StatelessWidget {
+       }
+     }
+     final adjust = c.getAdjustY();
++    final image = m.image;
++    final textureId = m.surfaceTextureId;
++    if (m.surfaceActive && textureId != null && image != null) {
++      // same place and size ImagePainter would draw the image at
++      return Positioned(
++        left: (c.x / s).toInt() * s,
++        top: ((c.y + adjust) / s).toInt() * s,
++        width: image.width * s,
++        height: image.height * s,
++        // low = plain bilinear; anything higher makes Skia copy the external
++        // texture and build mipmaps for every frame, too much for a Mali-450
++        child: Texture(textureId: textureId, filterQuality: FilterQuality.low),
++      );
++    }
+     return CustomPaint(
+       painter: ImagePainter(
+           image: m.image, x: c.x / s, y: (c.y + adjust) / s, scale: s),
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index 175e3ff..9b09479 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1943,7 +1943,53 @@ class ImageModel with ChangeNotifier {
+     _webDecodingRgba = false;
+   }
+ 
++  // Android: texture the hardware decoder renders the remote screen into.
++  int? surfaceTextureId;
++  bool _surfaceActive = false;
++
++  bool get surfaceActive => _surfaceActive && surfaceTextureId != null;
++
++  Future<void> createSurfaceTexture() async {
++    if (!isAndroid || surfaceTextureId != null) return;
++    try {
++      final id = await platformFFI.invokeMethod("create_video_texture");
++      if (id is int && id >= 0) surfaceTextureId = id;
++    } catch (e) {
++      debugPrint('create_video_texture: $e');
++    }
++  }
++
++  void releaseSurfaceTexture() {
++    if (surfaceTextureId == null) return;
++    surfaceTextureId = null;
++    _surfaceActive = false;
++    platformFFI.invokeMethod("release_video_texture");
++  }
++
++  // Frames of this display are on the texture. The rest of the session (canvas,
++  // scale, mouse) works with the image size, so keep a never drawn placeholder
++  // image of the display size.
++  onSurfaceFrame(int display) async {
++    final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
++    final w = rect?.width.toInt() ?? 0;
++    final h = rect?.height.toInt() ?? 0;
++    if (w <= 0 || h <= 0 || surfaceTextureId == null) return;
++    final activated = !_surfaceActive;
++    _surfaceActive = true;
++    if (_image == null || _image!.width != w || _image!.height != h) {
++      final pid = parent.target?.id;
++      final image = await img.decodeImageFromPixels(
++          Uint8List(w * h * 4), w, h, ui.PixelFormat.rgba8888);
++      if (parent.target?.id != pid) return;
++      await update(image);
++    } else if (activated) {
++      notifyListeners();
++    }
++  }
++
+   onRgba(int display, Uint8List rgba) async {
++    // frames come as rgba again (e.g. software decoding after a fallback)
++    _surfaceActive = false;
+     try {
+       await decodeAndUpdate(display, rgba);
+     } catch (e) {
+@@ -2017,6 +2063,7 @@ class ImageModel with ChangeNotifier {
+   void disposeImage() {
+     _image?.dispose();
+     _image = null;
++    releaseSurfaceTexture();
+   }
+ }
+ 
+@@ -3925,6 +3972,12 @@ class FFI {
+         } else if (message is EventToUI_Texture) {
+           final display = message.field0;
+           final gpuTexture = message.field1;
++          if (isAndroid) {
++            // the hardware decoder renders into the video texture
++            await imageModel.onSurfaceFrame(display);
++            onEvent2UIRgba();
++            return;
++          }
+           debugPrint(
+               "EventToUI_Texture display:$display, gpuTexture:$gpuTexture");
+           if (gpuTexture && !hasGpuTextureRender) {
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index c0eb7fb..45cbc2a 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -2455,6 +2455,8 @@ impl<T: InvokeUiSession> Remote<T> {
+                 } else {
+                     #[cfg(all(feature = "vram", feature = "flutter"))]
+                     handler.on_texture(display, _texture);
++                    #[cfg(all(feature = "mediacodec", feature = "flutter"))]
++                    handler.on_surface_frame(display);
+                 }
+             },
+         );
+diff --git a/src/flutter.rs b/src/flutter.rs
+index e6b325c..c5e3829 100644
+--- a/src/flutter.rs
++++ b/src/flutter.rs
+@@ -890,6 +890,27 @@ impl InvokeUiSession for FlutterHandler {
+         }
+     }
+ 
++    #[cfg(feature = "mediacodec")]
++    fn on_surface_frame(&self, display: usize) {
++        // the texture refreshes itself; tell the UI to show it, at most once a second
++        lazy_static::lazy_static! {
++            static ref LAST: std::sync::Mutex<HashMap<usize, std::time::Instant>> = Default::default();
++        }
++        let mut last = LAST.lock().unwrap();
++        if last
++            .get(&display)
++            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
++        {
++            return;
++        }
++        last.insert(display, std::time::Instant::now());
++        for (_, session) in self.session_handlers.read().unwrap().iter() {
++            if let Some(stream) = &session.event_stream {
++                stream.add(EventToUI::Texture(display, false));
++            }
++        }
++    }
++
+     fn set_peer_info(&self, pi: &PeerInfo) {
+         let displays = Self::make_displays_msg(&pi.displays);
+         let mut features: HashMap<&str, bool> = Default::default();
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index bf2e04c..5fd7c55 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -1737,6 +1737,9 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
+     fn next_rgba(&self, display: usize);
+     #[cfg(all(feature = "vram", feature = "flutter"))]
+     fn on_texture(&self, display: usize, texture: *mut c_void);
++    /// A frame was decoded straight into the video texture (Android MediaCodec).
++    #[cfg(all(feature = "mediacodec", feature = "flutter"))]
++    fn on_surface_frame(&self, _display: usize) {}
+     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
+     fn set_current_display(&self, disp_idx: i32);
+     #[cfg(feature = "flutter")]
+-- 
+2.34.1
+

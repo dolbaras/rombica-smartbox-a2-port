@@ -1,0 +1,30 @@
+#!/bin/sh
+# Rombica SmartBox A2: USB network (CDC-ECM) + serial console (CDC-ACM) on the OTG port
+# (dwc2 c9100000.usb), for SSH/console from a PC over the USB A-A cable.
+# The DTB sets the USB glue to dr_mode "otg"; without an ID pin it starts as host and the dwc2
+# device controller fails its probe, so switch the port to device and bind dwc2 again.
+set -e
+R=$(ls -d /sys/class/usb_role/*usb-role-switch 2>/dev/null | head -1)
+if [ -n "$R" ] && [ "$(cat $R/role)" != device ]; then echo device > $R/role; sleep 1; fi
+[ -e /sys/class/udc/c9100000.usb ] || { echo c9100000.usb > /sys/bus/platform/drivers/dwc2/bind; sleep 1; }
+modprobe libcomposite
+mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+G=/sys/kernel/config/usb_gadget/rombica
+if [ ! -d $G ]; then
+    mkdir -p $G && cd $G
+    echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0100 > bcdDevice; echo 0x0200 > bcdUSB
+    mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/ecm.usb0 functions/acm.GS0
+    echo "rombica-a2" > strings/0x409/serialnumber
+    echo "Rombica" > strings/0x409/manufacturer
+    echo "SmartBox A2 (Armbian)" > strings/0x409/product
+    echo "ECM + ACM" > configs/c.1/strings/0x409/configuration
+    echo 250 > configs/c.1/MaxPower
+    echo 02:52:4f:4d:41:01 > functions/ecm.usb0/dev_addr     # box side
+    echo 02:52:4f:4d:41:02 > functions/ecm.usb0/host_addr    # PC side
+    ln -s functions/ecm.usb0 configs/c.1/
+    ln -s functions/acm.GS0 configs/c.1/
+fi
+cd $G
+[ -n "$(cat UDC)" ] || echo c9100000.usb > UDC
+sleep 2
+nmcli con up usb-gadget >/dev/null 2>&1 || true   # usb0 appears after NetworkManager started

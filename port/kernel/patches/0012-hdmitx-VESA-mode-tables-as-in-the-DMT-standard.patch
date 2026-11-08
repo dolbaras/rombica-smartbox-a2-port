@@ -1,0 +1,491 @@
+From c47d6fdd8e1ef0003402b63e2a108b51bfaac000 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Tue, 6 Oct 2026 04:03:50 +0300
+Subject: [PATCH] hdmitx: VESA mode tables as in the DMT standard
+
+Checked against VESA DMT (port/tools/check_vesa_tables.py: timing,
+encoder registers, clock and PLL of every PC monitor mode):
+
+- 1280x800 had the reduced blanking totals (1440x823) with the 83.5 MHz
+  clock of the normal timing: 70 Hz at the sink. 1680x1050 used reduced
+  blanking (119 MHz). EDID standard timings and Established Timings III
+  name the normal DMT timings, which every monitor listing them takes;
+  both modes now use them (1680x831 at 83.5 MHz, 2240x1089 at
+  146.25 MHz), encoder tables and vout info to match.
+- 1360x768: pixel clock 855000 instead of 85500, so the mode was always
+  beyond any range limit and matched no detailed timing.
+- 2560x1440: CVT-RB vertical porches are 3/5/33, not 2/5/34.
+- sync polarities as in DMT (1024x768 -/-, the normal-blanking modes
+  -/+, ...); the encoder took +/+ for every VESA mode but 640x480, now
+  it takes the mode's polarity.
+- the 3180000 PLL setting (1280x768) gave 3168 MHz: frac 0x200 missing.
+- Established Timings III: 1280x960@60 is bit 3 of byte 7 (bit 2 is
+  @85), 1440x900@60 (byte 8 bit 5) was not collected.
+- line frequencies of a few modes.
+---
+ .../vout/hdmitx/hdmi_common/hdmi_parameters.c | 176 +++++++++---------
+ .../vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c     |   7 +-
+ .../vout/hdmitx/hdmi_tx_20/hw/enc_cfg_hw.c    |  32 ++--
+ .../vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c    |  37 ++--
+ .../media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c  |   2 +-
+ .../media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c  |   2 +-
+ 6 files changed, 124 insertions(+), 132 deletions(-)
+
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_common/hdmi_parameters.c b/drivers/amlogic/media/vout/hdmitx/hdmi_common/hdmi_parameters.c
+index 533409bb..023d1942 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_common/hdmi_parameters.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_common/hdmi_parameters.c
+@@ -1834,11 +1834,11 @@ static struct hdmi_format_para fmt_para_vesa_1024x768p60_4x3 = {
+ 	.tmds_clk = 65000,
+ 	.timing = {
+ 		.pixel_freq = 65000,
+-		.h_freq = 48360,
++		.h_freq = 48363,
+ 		.v_freq = 60004,
+ 		.vsync = 60,
+-		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.vsync_polarity = 0,
++		.hsync_polarity = 0,
+ 		.h_active = 1024,
+ 		.h_total = 1344,
+ 		.h_blank = 320,
+@@ -1933,7 +1933,7 @@ static struct hdmi_format_para fmt_para_vesa_1280x768p60_5x3 = {
+ 		.v_freq = 59870,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1280,
+ 		.h_total = 1664,
+ 		.h_blank = 384,
+@@ -1977,23 +1977,23 @@ static struct hdmi_format_para fmt_para_vesa_1280x800p60_8x5 = {
+ 	.tmds_clk = 83500,
+ 	.timing = {
+ 		.pixel_freq = 83500,
+-		.h_freq = 49380,
+-		.v_freq = 59910,
++		.h_freq = 49702,
++		.v_freq = 59810,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1280,
+-		.h_total = 1440,
+-		.h_blank = 160,
+-		.h_front = 48,
+-		.h_sync = 32,
+-		.h_back = 80,
++		.h_total = 1680,
++		.h_blank = 400,
++		.h_front = 72,
++		.h_sync = 128,
++		.h_back = 200,
+ 		.v_active = 800,
+-		.v_total = 823,
+-		.v_blank = 23,
++		.v_total = 831,
++		.v_blank = 31,
+ 		.v_front = 3,
+ 		.v_sync = 6,
+-		.v_back = 14,
++		.v_back = 22,
+ 		.v_sync_ln = 1,
+ 	},
+ 	.hdmitx_vinfo = {
+@@ -2007,8 +2007,8 @@ static struct hdmi_format_para fmt_para_vesa_1280x800p60_8x5 = {
+ 		.sync_duration_num = 60,
+ 		.sync_duration_den = 1,
+ 		.video_clk         = 83500000,
+-		.htotal            = 1440,
+-		.vtotal            = 823,
++		.htotal            = 1680,
++		.vtotal            = 831,
+ 		.fr_adj_type       = VOUT_FR_ADJ_HDMI,
+ 		.viu_color_fmt     = COLOR_FMT_YUV444,
+ 		.viu_mux           = VIU_MUX_ENCP,
+@@ -2119,10 +2119,10 @@ static struct hdmi_format_para fmt_para_vesa_1360x768p60_16x9 = {
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 855000,
++	.tmds_clk = 85500,
+ 	.timing = {
+-		.pixel_freq = 855000,
+-		.h_freq = 47700,
++		.pixel_freq = 85500,
++		.h_freq = 47712,
+ 		.v_freq = 60015,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+@@ -2170,7 +2170,7 @@ static struct hdmi_format_para fmt_para_vesa_1366x768p60_16x9 = {
+ 	.tmds_clk = 85500,
+ 	.timing = {
+ 		.pixel_freq = 85500,
+-		.h_freq = 47880,
++		.h_freq = 47712,
+ 		.v_freq = 59790,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+@@ -2222,7 +2222,7 @@ static struct hdmi_format_para fmt_para_vesa_1400x1050p60_4x3 = {
+ 		.v_freq = 59978,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1400,
+ 		.h_total = 1864,
+ 		.h_blank = 464,
+@@ -2267,11 +2267,11 @@ static struct hdmi_format_para fmt_para_vesa_1440x900p60_8x5 = {
+ 	.tmds_clk = 106500,
+ 	.timing = {
+ 		.pixel_freq = 106500,
+-		.h_freq = 56040,
++		.h_freq = 55935,
+ 		.v_freq = 59887,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1440,
+ 		.h_total = 1904,
+ 		.h_blank = 464,
+@@ -2356,51 +2356,51 @@ static struct hdmi_format_para fmt_para_vesa_1440x2560p60_9x16 = {
+ 
+ #if 1
+ static struct hdmi_format_para fmt_para_vesa_2560x1440p60_16x9 = {
+-        .vic = HDMIV_2560x1440p60hz,
+-        .name = "2560x1440p60hz",
+-        .sname = "2560x1440p60hz",
+-        .pixel_repetition_factor = 0,
+-        .progress_mode = 1,
+-        .scrambler_en = 0,
+-        .tmds_clk_div40 = 0,
+-        .tmds_clk =  241500,
+-        .timing = {
+-                .pixel_freq = 241500,
+-                .h_freq = 88790,
+-                .v_freq = 60000,
+-                .vsync = 60,
+-                .vsync_polarity = 1,
+-                .hsync_polarity = 1,
+-                .h_active = 2560,
+-                .h_total = 2720,
+-                .h_blank = 160,
+-                .h_front = 48,
+-                .h_sync = 32,
+-                .h_back = 80,
+-                .v_active = 1440,
+-                .v_total = 1481,
+-                .v_blank = 41,
+-                .v_front = 2,
+-                .v_sync = 5,
+-                .v_back = 34,
+-                .v_sync_ln = 1,
+-        },
+-        .hdmitx_vinfo = {
+-                .name              = "2560x1440p60hz",
+-                .mode              = VMODE_HDMI,
+-                .width             = 2560,
+-                .height            = 1440,
+-                .field_height      = 1440,
+-                .aspect_ratio_num  = 16,
+-                .aspect_ratio_den  = 9,
+-                .sync_duration_num = 60,
+-                .sync_duration_den = 1,
+-                .video_clk         = 241500000,
+-                .htotal            = 2720,
+-                .vtotal            = 1481,
+-                .viu_color_fmt     = COLOR_FMT_YUV444,
+-                .viu_mux           = VIU_MUX_ENCP,
+-        },
++	.vic = HDMIV_2560x1440p60hz,
++	.name = "2560x1440p60hz",
++	.sname = "2560x1440p60hz",
++	.pixel_repetition_factor = 0,
++	.progress_mode = 1,
++	.scrambler_en = 0,
++	.tmds_clk_div40 = 0,
++	.tmds_clk = 241500,
++	.timing = {
++		.pixel_freq = 241500,
++		.h_freq = 88787,
++		.v_freq = 59951,
++		.vsync = 60,
++		.vsync_polarity = 0,
++		.hsync_polarity = 1,
++		.h_active = 2560,
++		.h_total = 2720,
++		.h_blank = 160,
++		.h_front = 48,
++		.h_sync = 32,
++		.h_back = 80,
++		.v_active = 1440,
++		.v_total = 1481,
++		.v_blank = 41,
++		.v_front = 3,
++		.v_sync = 5,
++		.v_back = 33,
++		.v_sync_ln = 1,
++	},
++	.hdmitx_vinfo = {
++		.name              = "2560x1440p60hz",
++		.mode              = VMODE_HDMI,
++		.width             = 2560,
++		.height            = 1440,
++		.field_height      = 1440,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 60,
++		.sync_duration_den = 1,
++		.video_clk         = 241500000,
++		.htotal            = 2720,
++		.vtotal            = 1481,
++		.viu_color_fmt     = COLOR_FMT_YUV444,
++		.viu_mux           = VIU_MUX_ENCP,
++	},
+ };
+ #endif
+ 
+@@ -2559,26 +2559,26 @@ static struct hdmi_format_para fmt_para_vesa_1680x1050p60_8x5 = {
+ 	.progress_mode = 1,
+ 	.scrambler_en = 0,
+ 	.tmds_clk_div40 = 0,
+-	.tmds_clk = 119000,
++	.tmds_clk = 146250,
+ 	.timing = {
+-		.pixel_freq = 119000,
+-		.h_freq = 64673,
+-		.v_freq = 59883,
++		.pixel_freq = 146250,
++		.h_freq = 65290,
++		.v_freq = 59954,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1680,
+-		.h_total = 1840,
+-		.h_blank = 160,
+-		.h_front = 48,
+-		.h_sync = 32,
+-		.h_back = 80,
++		.h_total = 2240,
++		.h_blank = 560,
++		.h_front = 104,
++		.h_sync = 176,
++		.h_back = 280,
+ 		.v_active = 1050,
+-		.v_total = 1080,
+-		.v_blank = 30,
++		.v_total = 1089,
++		.v_blank = 39,
+ 		.v_front = 3,
+ 		.v_sync = 6,
+-		.v_back = 21,
++		.v_back = 30,
+ 		.v_sync_ln = 1,
+ 	},
+ 	.hdmitx_vinfo = {
+@@ -2591,9 +2591,9 @@ static struct hdmi_format_para fmt_para_vesa_1680x1050p60_8x5 = {
+ 		.aspect_ratio_den  = 5,
+ 		.sync_duration_num = 60,
+ 		.sync_duration_den = 1,
+-		.video_clk         = 119000000,
+-		.htotal            = 1840,
+-		.vtotal            = 1080,
++		.video_clk         = 146250000,
++		.htotal            = 2240,
++		.vtotal            = 1089,
+ 		.fr_adj_type       = VOUT_FR_ADJ_HDMI,
+ 		.viu_color_fmt     = COLOR_FMT_YUV444,
+ 		.viu_mux           = VIU_MUX_ENCP,
+@@ -2611,11 +2611,11 @@ static struct hdmi_format_para fmt_para_vesa_1920x1200p60_8x5 = {
+ 	.tmds_clk = 193250,
+ 	.timing = {
+ 		.pixel_freq = 193250,
+-		.h_freq = 74700,
++		.h_freq = 74556,
+ 		.v_freq = 59885,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 1920,
+ 		.h_total = 2592,
+ 		.h_blank = 672,
+@@ -2712,7 +2712,7 @@ static struct hdmi_format_para fmt_para_vesa_2560x1600p60_8x5 = {
+ 		.v_freq = 59987,
+ 		.vsync = 60,
+ 		.vsync_polarity = 1,
+-		.hsync_polarity = 1,
++		.hsync_polarity = 0,
+ 		.h_active = 2560,
+ 		.h_total = 3504,
+ 		.h_blank = 944,
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
+index 564d8a9a..8ced8dc2 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
+@@ -214,18 +214,23 @@ static void Edid_EstablishedTimings(struct rx_cap *prxcap, unsigned char *data)
+ 		store_vesa_idx(prxcap, HDMIV_1024x768p60hz);
+ }
+ 
++/* Established Timings III (VESA E-EDID 1.4 table 3.29); the modes are the
++ * DMT ones without reduced blanking
++ */
+ static void Edid_StandardTimingIII(struct rx_cap *prxcap, unsigned char *data)
+ {
+ 	if (data[0] & (1 << 0))
+ 		store_vesa_idx(prxcap, HDMIV_1152x864p75hz);
+ 	if (data[1] & (1 << 6))
+ 		store_vesa_idx(prxcap, HDMIV_1280x768p60hz);
+-	if (data[1] & (1 << 2))
++	if (data[1] & (1 << 3))
+ 		store_vesa_idx(prxcap, HDMIV_1280x960p60hz);
+ 	if (data[1] & (1 << 1))
+ 		store_vesa_idx(prxcap, HDMIV_1280x1024p60hz);
+ 	if (data[2] & (1 << 7))
+ 		store_vesa_idx(prxcap, HDMIV_1360x768p60hz);
++	if (data[2] & (1 << 5))
++		store_vesa_idx(prxcap, HDMIV_1440x900p60hz);
+ 	if (data[2] & (1 << 1))
+ 		store_vesa_idx(prxcap, HDMIV_1400x1050p60hz);
+ 	if (data[3] & (1 << 5))
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/enc_cfg_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/enc_cfg_hw.c
+index 14722f1f..18690149 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/enc_cfg_hw.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/enc_cfg_hw.c
+@@ -986,14 +986,14 @@ static const struct reg_s tvregs_vesa_1280x800p60hz[] = {
+ 
+ 	{P_ENCP_VIDEO_MODE, 0x4040,},
+ 	{P_ENCP_VIDEO_MODE_ADV, 0x18,},
+-	{P_ENCP_VIDEO_MAX_PXCNT, 0x59F,},
+-	{P_ENCP_VIDEO_MAX_LNCNT, 0x336,},
+-	{P_ENCP_VIDEO_HAVON_BEGIN, 0x70,},
+-	{P_ENCP_VIDEO_HAVON_END, 0x56F,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x14,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x333,},
++	{P_ENCP_VIDEO_MAX_PXCNT, 0x68F,},
++	{P_ENCP_VIDEO_MAX_LNCNT, 0x33E,},
++	{P_ENCP_VIDEO_HAVON_BEGIN, 0x148,},
++	{P_ENCP_VIDEO_HAVON_END, 0x647,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x1C,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x33B,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+-	{P_ENCP_VIDEO_HSO_END, 0x20,},
++	{P_ENCP_VIDEO_HSO_END, 0x80,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+ 	{P_ENCP_VIDEO_VSO_END, 0x32,},
+ 	{P_ENCP_VIDEO_VSO_BLINE, 0x0,},
+@@ -1244,14 +1244,14 @@ static const struct reg_s tvregs_vesa_1680x1050p60hz[] = {
+ 
+ 	{P_ENCP_VIDEO_MODE, 0x4040,},
+ 	{P_ENCP_VIDEO_MODE_ADV, 0x18,},
+-	{P_ENCP_VIDEO_MAX_PXCNT, 0x72F,},
+-	{P_ENCP_VIDEO_MAX_LNCNT, 0x437,},
+-	{P_ENCP_VIDEO_HAVON_BEGIN, 0x70,},
+-	{P_ENCP_VIDEO_HAVON_END, 0x6FF,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x1B,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x434,},
++	{P_ENCP_VIDEO_MAX_PXCNT, 0x8BF,},
++	{P_ENCP_VIDEO_MAX_LNCNT, 0x440,},
++	{P_ENCP_VIDEO_HAVON_BEGIN, 0x1C8,},
++	{P_ENCP_VIDEO_HAVON_END, 0x857,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x24,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x43D,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+-	{P_ENCP_VIDEO_HSO_END, 0x20,},
++	{P_ENCP_VIDEO_HSO_END, 0xB0,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+ 	{P_ENCP_VIDEO_VSO_END, 0x32,},
+ 	{P_ENCP_VIDEO_VSO_BLINE, 0x0,},
+@@ -1374,8 +1374,8 @@ static const struct reg_s tvregs_vesa_2560x1440p60hz[] = {
+ 	{P_ENCP_VIDEO_MAX_LNCNT, 0x5C8,},
+ 	{P_ENCP_VIDEO_HAVON_BEGIN, 0x70,},
+ 	{P_ENCP_VIDEO_HAVON_END, 0xA6F,},
+-	{P_ENCP_VIDEO_VAVON_BLINE, 0x27,},
+-	{P_ENCP_VIDEO_VAVON_ELINE, 0x5C6,},
++	{P_ENCP_VIDEO_VAVON_BLINE, 0x26,},
++	{P_ENCP_VIDEO_VAVON_ELINE, 0x5C5,},
+ 	{P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
+ 	{P_ENCP_VIDEO_HSO_END, 0x20,},
+ 	{P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
+index ccee033c..bcc676d9 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
+@@ -1400,31 +1400,18 @@ static void hdmi_tvenc_vesa_set(struct hdmitx_vidpara *param)
+ 	hd_write_reg(P_ENCP_DVI_VSO_BEGIN_EVN, vso_begin_evn);  /* 1692 */
+ 	hd_write_reg(P_ENCP_DVI_VSO_END_EVN, vso_begin_evn);  /* 1692 */
+ 
+-	switch (param->VIC) {
+-	case HDMIV_640x480p60hz:
+-		hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+-				(0 << 1) |
+-				(0 << 2) |
+-				(0 << 3) |
+-				(0 << 4) |
+-				(4 << 5) |
+-				(0 << 8) |
+-				(0 << 12)
+-		);
+-		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+-		break;
+-	default:
+-		hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+-				(0 << 1) | /* [	1] src_sel_encp */
+-				(HSYNC_POLARITY << 2) |
+-				(VSYNC_POLARITY << 3) |
+-				(0 << 4) |
+-				(4 << 5) |
+-				(0 << 8) |
+-				(0 << 12)
+-		);
+-		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+-	}
++	/* sync polarity of the mode (VESA DMT: e.g. 1024x768 -/-,
++	 * 1280x1024 +/+, 1680x1050 -/+); 1 = active high
++	 */
++	hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
++			(0 << 1) | /* [	1] src_sel_encp */
++			(vtiming->hsync_polarity << 2) |
++			(vtiming->vsync_polarity << 3) |
++			(0 << 4) |
++			(4 << 5) |
++			(0 << 8) |
++			(0 << 12)
++	);
+ 	hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+ }
+ 
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
+index 33028b46..2e8e2ccf 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
+@@ -876,7 +876,7 @@ static struct hw_enc_clk_val_group setting_enc_clk_val_24[] = {
+ 		4897000, 2, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+ 	{{HDMIV_1680x1050p60hz,
+ 	  HDMI_VIC_END},
+-		1190000, 4, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
++		1462500, 4, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+ 	{{HDMIV_1920x1200p60hz,
+ 	  HDMI_VIC_END},
+ 		1932500, 2, 1, 1, VID_PLL_DIV_5, 2, 1, 1, -1},
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
+index 8fdf36c7..ddc1d747 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
+@@ -308,7 +308,7 @@ void set_gxl_hpll_clk_out(unsigned int frac_rate, unsigned int clk)
+ 		break;
+ 	case 3180000:
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x40000284);
+-		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb200);
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL2, 0x860f30c4);
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL3, 0x0c8e0000);
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL4, 0x001fa729);
+-- 
+2.34.1
+

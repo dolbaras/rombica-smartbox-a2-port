@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rombica SmartBox A2: the AP6181 module (BCM43362) has no Bluetooth. The SlimBOX ATV build
+     declares Bluetooth (made for AP6212), so the stack keeps sending HCI Reset to a missing
+     controller and restarts every ~20 s. Without these features Android does not start the
+     Bluetooth service at all ("Bluetooth Hardware Not Present"). -->
+<permissions>
+    <unavailable-feature name="android.hardware.bluetooth" />
+    <unavailable-feature name="android.hardware.bluetooth_le" />
+</permissions>

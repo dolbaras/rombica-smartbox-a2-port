@@ -1,0 +1,116 @@
+From fd76efa1d570d8df7cef914890366e0e4ae344f6 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Thu, 1 Oct 2026 05:30:00 +0300
+Subject: [PATCH] osd: cursor plane (OSD2): canvas stride aligned to 8 bytes,
+ not 64
+
+The Android hwcomposer copies the mouse cursor image into fb1 (OSD2) with a
+tight stride (width * 4) and ignores fix.line_length. With the stride padded
+to 64 bytes every cursor whose width is not a multiple of 16 px was sheared
+(a 40x36 arrow became a smeared blob; 256x256 was fine). The canvas needs
+only 8-byte granularity, so OSD2 uses that for line_length and the canvas.
+---
+ drivers/amlogic/media/osd/osd_fb.c |  7 ++++---
+ drivers/amlogic/media/osd/osd_hw.c | 12 +++++++-----
+ drivers/amlogic/media/osd/osd_hw.h |  9 +++++++++
+ 3 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_fb.c
+index 5fc7519e..73bfec59 100644
+--- a/drivers/amlogic/media/osd/osd_fb.c
++++ b/drivers/amlogic/media/osd/osd_fb.c
+@@ -641,8 +641,8 @@ static int osd_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+ 		    var->transp.length, var->transp.offset);
+ 	fix->visual = color_format_pt->color_type;
+ 	/* adjust memory length. */
+-	fix->line_length =
+-		CANVAS_ALIGNED(var->xres_virtual * var->bits_per_pixel / 8);
++	fix->line_length = OSD_CANVAS_ALIGNED(fbdev->fb_index,
++		var->xres_virtual * var->bits_per_pixel / 8);
+ 	osd_log_dbg(MODULE_BASE, "xvirtual=%d, bpp:%d, line_length=%d\n",
+ 		var->xres_virtual, var->bits_per_pixel, fix->line_length);
+ 
+@@ -4563,7 +4563,8 @@ static int osd_probe(struct platform_device *pdev)
+ 				(fbdev->color->color_index > 16 ?
+ 				(fbdev->color->color_index > 24 ?
+ 				 4 : 3) : 2) : 1);
+-		fix->line_length = CANVAS_ALIGNED(var->xres_virtual * bpp);
++		fix->line_length = OSD_CANVAS_ALIGNED(index,
++					var->xres_virtual * bpp);
+ 		fix->smem_start = fbdev->fb_mem_paddr;
+ 		fix->smem_len = fbdev->fb_len;
+ 		if (fb_alloc_cmap(&fbi->cmap, 16, 0) != 0) {
+diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_hw.c
+index 0056de5c..934469da 100644
+--- a/drivers/amlogic/media/osd/osd_hw.c
++++ b/drivers/amlogic/media/osd/osd_hw.c
+@@ -2896,7 +2896,8 @@ void osd_setup_hw(u32 index,
+ 		else {
+ 			canvas_config(osd_hw.fb_gem[index].canvas_idx,
+ 				osd_hw.fb_gem[index].addr,
+-				CANVAS_ALIGNED(osd_hw.fb_gem[index].width),
++				OSD_CANVAS_ALIGNED(index,
++					osd_hw.fb_gem[index].width),
+ 				osd_hw.fb_gem[index].height,
+ 				CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+ 		}
+@@ -8600,7 +8601,8 @@ static int osd_setting_order(u32 output_index)
+ 			if (!osd_hw.osd_afbcd[i].enable)
+ 				canvas_config(osd_hw.fb_gem[i].canvas_idx,
+ 					osd_hw.fb_gem[i].addr,
+-					CANVAS_ALIGNED(osd_hw.fb_gem[i].width),
++					OSD_CANVAS_ALIGNED(i,
++						osd_hw.fb_gem[i].width),
+ 					osd_hw.fb_gem[i].height,
+ 					CANVAS_ADDR_NOWRAP,
+ 					CANVAS_BLKMODE_LINEAR);
+@@ -8825,7 +8827,7 @@ static void osd_setting_old_hwc(void)
+ 	if (!osd_hw.osd_afbcd[index].enable)
+ 		canvas_config(osd_hw.fb_gem[index].canvas_idx,
+ 			osd_hw.fb_gem[index].addr,
+-			CANVAS_ALIGNED(osd_hw.fb_gem[index].width),
++			OSD_CANVAS_ALIGNED(index, osd_hw.fb_gem[index].width),
+ 			osd_hw.fb_gem[index].height,
+ 			CANVAS_ADDR_NOWRAP,
+ 			CANVAS_BLKMODE_LINEAR);
+@@ -8867,7 +8869,7 @@ static void osd_setting_viu2(void)
+ 	if (!osd_hw.osd_afbcd[index].enable)
+ 		canvas_config(osd_hw.fb_gem[index].canvas_idx,
+ 			osd_hw.fb_gem[index].addr,
+-			CANVAS_ALIGNED(osd_hw.fb_gem[index].width),
++			OSD_CANVAS_ALIGNED(index, osd_hw.fb_gem[index].width),
+ 			osd_hw.fb_gem[index].height,
+ 			CANVAS_ADDR_NOWRAP,
+ 			CANVAS_BLKMODE_LINEAR);
+@@ -10355,7 +10357,7 @@ void osd_restore_hw(void)
+ 		for (i = 0; i < osd_hw.osd_meson_dev.osd_count; i++)
+ 		canvas_config(osd_hw.fb_gem[i].canvas_idx,
+ 			osd_hw.fb_gem[i].addr,
+-			CANVAS_ALIGNED(osd_hw.fb_gem[i].width),
++			OSD_CANVAS_ALIGNED(i, osd_hw.fb_gem[i].width),
+ 			osd_hw.fb_gem[i].height,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+ 	}
+diff --git a/drivers/amlogic/media/osd/osd_hw.h b/drivers/amlogic/media/osd/osd_hw.h
+index 51378116..7d643f99 100644
+--- a/drivers/amlogic/media/osd/osd_hw.h
++++ b/drivers/amlogic/media/osd/osd_hw.h
+@@ -24,6 +24,15 @@
+ #include "osd_drm.h"
+ 
+ #define CANVAS_ALIGNED(x) (((x) + 63) & ~63)
++/*
++ * OSD2 is the mouse cursor plane. The Android hwcomposer copies the cursor
++ * image into it with a tight stride (width * 4) and ignores line_length, so a
++ * stride padded to 64 bytes shears every cursor whose width is not a multiple
++ * of 16 px (a 40 px arrow became a smeared blob). The canvas only needs
++ * 8-byte granularity.
++ */
++#define OSD_CANVAS_ALIGNED(index, x) \
++	((index) == OSD2 ? (((x) + 7) & ~7) : CANVAS_ALIGNED(x))
+ #define MAX_HOLD_LINE     0x1f
+ #define MIN_HOLD_LINE     0x04
+ #define VIU1_DEFAULT_HOLD_LINE  0x04
+-- 
+2.34.1
+

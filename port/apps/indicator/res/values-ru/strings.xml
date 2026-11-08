@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Индикатор</string>
+    <string name="hint">Светодиод на передней панели Rombica SmartBox A2 во включённом состоянии. У него два цвета на одном выводе: если активны оба, красный показывается поверх синего. В режиме сна индикатор красный (это задаёт прошивка питания).</string>
+    <string name="blue">Синий</string>
+    <string name="red">Красный</string>
+    <string-array name="roles">
+        <item>Выключен</item>
+        <item>Горит</item>
+        <item>Мигает (сердцебиение)</item>
+        <item>Мигает при работе с памятью</item>
+        <item>Мигает при нажатии кнопок пульта</item>
+    </string-array>
+    <string name="port_info">Порт Rombica A2</string>
+    <string name="no_changelog">Нет списка изменений в /vendor/etc/rombica_port.</string>
+</resources>

@@ -1,0 +1,26 @@
+# Published: the sources of the port (github.com/dolbaras/rombica-smartbox-a2-port).
+# Firmware images go to the releases of github.com/dolbaras/rombica-smartbox-a2-roms.
+# Everything else in this folder (firmware inputs, backups, Armbian images, notes) stays local.
+/*
+!/.gitignore
+!/README.md
+!/port/
+!/release/
+/release/*
+!/release/INSTALL.txt
+!/release/CHANGELOG.txt
+!/release/CHANGELOG.ru.txt
+
+# port/: build output, downloaded toolchains and sources, private or local-only files
+/port/out/
+/port/toolchains/
+/port/src/
+/port/uart_logs/
+/port/emmc_short_guide.jpg
+/port/apps/keys/
+/port/apps/out/
+/port/apps/rustdesk/out/
+/port/bootloader/out/
+/port/tools/codectest/CodecTest.apk
+__pycache__/
+*.pyc

@@ -1,0 +1,12 @@
+[Unit]
+Description=USB gadget: network (ECM) + serial console (ACM) on the OTG port
+After=systemd-modules-load.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-gadget
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=YouTube (аппаратно)
+Name[en]=YouTube (hardware)
+Comment=Плеер YouTube с аппаратным H.264: скопируйте ссылку и запустите, или закладка «▶ HW» в браузере
+Exec=yt-play %u
+Icon=video-display
+Terminal=false
+Categories=AudioVideo;Video;Player;
+MimeType=x-scheme-handler/ytplay;

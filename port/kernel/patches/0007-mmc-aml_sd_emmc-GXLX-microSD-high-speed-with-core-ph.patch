@@ -1,0 +1,28 @@
+From 158e897d63d610fccc347511409d3716a9212dfc Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:09 +0300
+Subject: [PATCH 7/7] mmc: aml_sd_emmc: GXLX microSD high speed with core phase
+ 3
+
+The S905L2 microSD port gives response CRC errors in SD high-speed mode
+with core phase 2; phase 3 is what the stock GXLX U-Boot uses.
+---
+ drivers/amlogic/mmc/aml_sd_emmc.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sd_emmc.c b/drivers/amlogic/mmc/aml_sd_emmc.c
+index 2847daf6..d1484da4 100644
+--- a/drivers/amlogic/mmc/aml_sd_emmc.c
++++ b/drivers/amlogic/mmc/aml_sd_emmc.c
+@@ -3542,7 +3542,10 @@ static struct meson_mmc_data mmc_data_gxlx = {
+ 	.sdmmc.ddr.core_phase = 2,
+ 	.sdmmc.hs2.core_phase = 2,
+ 	.sdmmc.hs4.tx_delay = 0,
+-	.sdmmc.sd_hs.core_phase = 2,
++	/* S905L2 microSD: CRC errors with phase 2 in SD high-speed mode; the stock
++	 * GXLX U-Boot also runs this port with core phase 3.
++	 */
++	.sdmmc.sd_hs.core_phase = 3,
+ 	.sdmmc.sdr104.core_phase = 2,
+ };
+ static struct meson_mmc_data mmc_data_txhd = {

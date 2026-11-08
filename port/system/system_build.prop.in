@@ -1,0 +1,7 @@
+# Rombica SmartBox A2 port: values changed in SlimBOX's /system/build.prop (vendor/edit_props.py).
+# build.sh fills in @VARIANT@ (ATV or AOSP, from the SlimBOX image) and @VERSION@ (port/VERSION).
+# ro.build.fingerprint is intentionally left untouched (Google certification).
+ro.build.display.id=SlimBOX 9.20 @VARIANT@ - Rombica SmartBox A2 (S905L2) port v@VERSION@ by Dolbaras, with Claude
+ro.product.model=SmartBox A2
+ro.product.brand=Rombica
+ro.product.manufacturer=Rombica

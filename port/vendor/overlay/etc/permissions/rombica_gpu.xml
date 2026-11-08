@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rombica SmartBox A2: the GPU is a Mali-450 MP2 (Utgard, driver r8p0): OpenGL ES 2.0 only.
+     SlimBOX declares the Android Extension Pack (it needs OpenGL ES 3.1), so apps that require
+     it would install and then fail; ro.opengles.version is set to 2.0 in /vendor/default.prop. -->
+<permissions>
+    <unavailable-feature name="android.hardware.opengles.aep" />
+</permissions>

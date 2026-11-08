@@ -1,0 +1,16 @@
+# Rombica SmartBox A2 port: properties SlimBOX does not define (appended to /vendor/default.prop).
+# Template: build.sh fills in the port version (port/VERSION), the variant (ATV or AOSP, from the
+# SlimBOX image) and the SlimBOX image name. Values SlimBOX already defines are changed in its own
+# build.prop files instead (vendor/vendor_build.prop.in, system/system_build.prop.in).
+#
+ro.rombica.port.version=@VERSION@
+ro.rombica.port.authors=Dolbaras, with Claude (Anthropic)
+ro.rombica.port.base=SlimBOX 9.20 @VARIANT@ (@BASE@)
+#
+# Remote desktop mode (Settings -> slimBOXtv settings -> Mouse and keyboard): 0 = off (right
+# mouse button BACK, stock keyboard, as in SlimBOX), 1 = on (right click, keyboard "like on a PC").
+# Applied at once by rombica_a2.rc. The property is the one SlimBOX's mouse screen already writes.
+persist.vendor.mouse_touch_input=0
+#
+# adb over USB always on (no authorisation: ro.adb.secure=0 in SlimBOX's build).
+persist.sys.usb.config=adb

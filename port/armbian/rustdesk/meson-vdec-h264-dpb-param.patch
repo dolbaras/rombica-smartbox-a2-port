@@ -1,0 +1,26 @@
+--- a/drivers/staging/media/meson/vdec/codec_h264.c
++++ b/drivers/staging/media/meson/vdec/codec_h264.c
+@@ -282,6 +282,10 @@
+ 	sess->pixelaspect = par_table[ar_idc];
+ }
+ 
++/* experiment: value of the third byte of AV_SCRATCH_0 (-1: max_refs - 1) */
++static int h264_dpb_field = -1;
++module_param(h264_dpb_field, int, 0644);
++
+ static int codec_h264_resume(struct amvdec_session *sess)
+ {
+ 	struct amvdec_core *core = sess->core;
+@@ -318,7 +322,11 @@
+ 
+ 	amvdec_write_dos(core, AV_SCRATCH_0, (h264->max_refs << 24) |
+ 					     (sess->num_dst_bufs << 16) |
+-					     ((h264->max_refs - 1) << 8));
++					     ((h264_dpb_field >= 0 ? h264_dpb_field :
++					       h264->max_refs - 1) << 8));
++	dev_info(core->dev, "h264: max_refs %u, dst bufs %u, dpb field %d\n",
++		 h264->max_refs, sess->num_dst_bufs,
++		 h264_dpb_field >= 0 ? h264_dpb_field : (int)h264->max_refs - 1);
+ 
+ 	return 0;
+ }

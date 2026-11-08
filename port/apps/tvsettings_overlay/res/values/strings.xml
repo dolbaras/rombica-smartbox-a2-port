@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- overrides TvSettings string "bluetooth": the menu entry is the LED settings now -->
+    <string name="bluetooth">Indicator</string>
+    <!-- overrides TvSettings string "mouse_touch_input_summary": now the summary of the remote desktop mode switch -->
+    <string name="mouse_touch_input_summary">For RustDesk, RuDesktop (keyboard mode Map): the right mouse button is a right click; Win, Alt+Tab, PrintScreen, Enter, Home go to the remote computer (Tab and Win then do nothing in Android). Off: the right button is BACK. Applies at once.</string>
+    <!-- overrides TvSettings string "system_mouse": the screen has keyboard settings too -->
+    <string name="system_mouse">Mouse and keyboard</string>
+</resources>

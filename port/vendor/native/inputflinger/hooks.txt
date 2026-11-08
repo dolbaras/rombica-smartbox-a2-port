@@ -1,0 +1,10 @@
+# libinputflinger.so of SlimBOX 9.20 after make_rclick_lib.py (right click)
+md5 a391f61513f41a0ae3eac47deae3f079
+import pthread_mutex_lock pthread_mutex_unlock dl_iterate_phdr
+# EventHub::getDeviceLocked(int) const
+extern get_device_locked 0x1fb74
+# EventHub::mapKey(...) const after its first instruction (see trampolines.S)
+extern map_key_rest 0x2046c
+# EventHub::mapKey(int deviceId, int scanCode, int usageCode, int metaState, int *outKeycode,
+#                  int *outMetaState, uint32_t *outFlags) const: push {r4-r11,lr}
+hook rombica_map_key 0x20468 2de9f04f

@@ -1,0 +1,21 @@
+# /vendor/bin/systemcontrol of SlimBOX 9.20 (unmodified)
+md5 ec17561514fceeb4f9525cc955a53fa9
+import property_get open read close atoi strncmp __android_log_print pthread_mutex_lock pthread_mutex_unlock
+# DisplayMode::getHighestHdmiMode(char *mode, hdmi_data_t *data)
+extern orig_highest_hdmi_mode 0x215a8
+# rest of DisplayMode::getPosition / setPosition after their first instruction (trampolines.S)
+extern get_position_rest 0x21160
+extern set_position_rest 0x21c08
+# rest of DisplayMode::getBestHdmiDeepColorAttr after its first instruction (trampolines.S)
+extern best_color_rest 0x2ae80
+# Ubootenv::getValue(const char *key) and DisplayMode::setBootEnv(const char *key, const char *value)
+extern bootenv_get 0x18910
+extern set_boot_env 0x1fc20
+# getHdmiOutputMode(): "bl getHighestHdmiMode" (best-mode policy)
+call rombica_hdmi_mode 0x1fe2a 01f0bdfb
+# DisplayMode::getPosition: push {r4-r9, lr}
+hook rombica_get_position 0x2115c 2de9f043
+# DisplayMode::setPosition: push {r4-fp, lr}
+hook rombica_set_position 0x21c04 2de9f04f
+# DisplayMode::getBestHdmiDeepColorAttr(outputmode, colorAttribute): push {r4-fp, lr}
+hook rombica_best_color 0x2ae7c 2de9f04f

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rombica SmartBox A2: front LED settings, one role per colour. Stored in the properties
+     persist.vendor.rombica.led.blue/red through Amlogic's systemcontrol (droidlogic.jar);
+     init applies them as kernel LED triggers (/vendor/etc/init/rombica_a2.rc).
+     Also the port's version and changelog screen (PortInfoActivity).
+     No launcher icons: both are parts of the system, opened from TvSettings (the settings app of
+     the ATV and the AOSP build alike). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ru.rombica.indicator"
+    android:versionCode="8"
+    android:versionName="8.0">
+
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="28" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/icon"
+        android:banner="@drawable/banner"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <uses-library android:name="droidlogic.software.core" android:required="true" />
+        <activity
+            android:name=".IndicatorActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="ru.rombica.indicator.SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".PortInfoActivity"
+            android:label="@string/port_info"
+            android:exported="true">
+            <!-- TvSettings: "project slimBOXtv" screen -->
+            <intent-filter>
+                <action android:name="ru.rombica.indicator.PORT_INFO" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

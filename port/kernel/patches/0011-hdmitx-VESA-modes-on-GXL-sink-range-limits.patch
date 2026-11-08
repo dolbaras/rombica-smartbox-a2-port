@@ -1,0 +1,264 @@
+From b4e02eb9edd9e8a69fe63115bed276da91871314 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Mon, 5 Oct 2026 23:03:14 +0300
+Subject: [PATCH] hdmitx: VESA modes on GXL, sink range limits
+
+A 1280x1024 monitor (Acer V193 behind an HDMI-VGA adapter) got no
+picture: Android picked 1080p60 (the adapter's EDID lists VIC 16, the
+monitor tops out at 140 MHz), and forcing 1280x1024p60hz failed too
+("error hpll clk: 1080000"). 720p60 shows.
+
+The VESA entries of setting_enc_clk_val_24 hold the PLL output after
+the od dividers, as G12A expects. GXL/GXM set the HDMI PLL by its VCO
+frequency (2.9-6 GHz), which is that value times od1*od2*od3; with the
+raw value set_gxl_hpll_clk_out() found no match, left the PLL at the
+previous mode's frequency and the sink got e.g. 1280x1024 at 82 Hz.
+Multiply on GXL/GXM when the value is below the VCO range (1280x1024:
+4320000, 1024x768: 5200000, 640x480: 4028000 - all in the GXL table).
+The GXL PLL table lacked 3960000 (2560x1080, VIC 90) and 4830000
+(2560x1440); added: VCO = 24 MHz * (M + frac / 1024).
+
+disp_cap (what systemcontrol and the resolution menu offer):
+- drop modes faster than the max pixel clock of the EDID display range
+  limits descriptor (ignored for HDMI 2.x sinks with an HF-VSDB), so
+  the best mode is one the monitor can show;
+- also accept the VESA modes the sink lists in its EDID (already
+  collected in rxcap.vesa_timing and shown in vesa_cap), and mark the
+  first detailed timing's VESA mode with '*' when the sink has no
+  native CEA mode. If that timing is none of the driver's modes (e.g.
+  reduced blanking), the native mode is the listed VESA mode of the
+  same size and refresh rate.
+---
+ .../vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c     | 86 ++++++++++++++++++-
+ .../vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c     |  4 +
+ .../media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c  | 14 ++-
+ .../media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c  | 27 ++++++
+ .../media/vout/hdmi_tx/hdmi_tx_module.h       |  1 +
+ 5 files changed, 130 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
+index 4a1f8e01..564d8a9a 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_edid.c
+@@ -2202,6 +2202,68 @@ static bool is_4k60_supported(struct rx_cap *prxcap)
+ 	return false;
+ }
+ 
++/* VESA mode of the first detailed timing (the monitor's native mode) */
++static enum hdmi_vic pmt_vesa_vic = HDMI_Unknown;
++/* size and refresh rate of that timing when it is none of our modes (e.g.
++ * reduced blanking): the native mode is then our mode of that size and rate
++ * if the sink lists it too
++ */
++static unsigned int pmt_hactive, pmt_vactive, pmt_hz;
++/* max pixel clock of the display range limits descriptor, kHz (0: none) */
++static unsigned int range_max_pclk;
++
++/*
++ * A mode faster than the sink's range limits can not be shown, even if
++ * the sink lists it (an HDMI-VGA adapter lists 1080p for any monitor).
++ * HDMI 2.x sinks (HF-VSDB) are trusted as they are.
++ */
++static bool beyond_range_limits(struct rx_cap *prxcap, enum hdmi_vic vic)
++{
++	struct hdmi_format_para *para = hdmi_get_fmt_paras(vic);
++
++	if (!range_max_pclk || prxcap->Max_TMDS_Clock2 || !para)
++		return false;
++	return para->timing.pixel_freq > range_max_pclk;
++}
++
++/* a VESA mode the sink lists in its EDID (std/established/DTD timings) */
++static bool vesa_supported(struct rx_cap *prxcap, enum hdmi_vic vic)
++{
++	int i;
++
++	if (vic < HDMITX_VESA_OFFSET)
++		return false;
++	for (i = 0; i < VESA_MAX_TIMING && prxcap->vesa_timing[i]; i++)
++		if (prxcap->vesa_timing[i] == vic)
++			return true;
++	return false;
++}
++
++/* the sink's native VESA mode, for a sink without a native CEA mode */
++const char *hdmitx_edid_get_native_vesa(struct hdmitx_dev *hdev)
++{
++	struct rx_cap *prxcap = &hdev->rxcap;
++	struct hdmi_format_para *para;
++	int i;
++
++	if (pmt_vesa_vic != HDMI_Unknown) {
++		if (!vesa_supported(prxcap, pmt_vesa_vic) ||
++		    beyond_range_limits(prxcap, pmt_vesa_vic))
++			return NULL;
++		return hdmitx_edid_vic_to_string(pmt_vesa_vic);
++	}
++	for (i = 0; pmt_hz && i < VESA_MAX_TIMING && prxcap->vesa_timing[i];
++	     i++) {
++		para = hdmi_get_fmt_paras(prxcap->vesa_timing[i]);
++		if (para && para->timing.h_active == pmt_hactive &&
++		    para->timing.v_active == pmt_vactive &&
++		    para->timing.vsync == pmt_hz &&
++		    !beyond_range_limits(prxcap, para->vic))
++			return hdmitx_edid_vic_to_string(para->vic);
++	}
++	return NULL;
++}
++
+ static void Edid_Descriptor_PMT(struct rx_cap *prxcap,
+ 				struct vesa_standard_timing *t,
+ 				unsigned char *data)
+@@ -2218,8 +2280,19 @@ static void Edid_Descriptor_PMT(struct rx_cap *prxcap,
+ 		prxcap->native_VIC = para->vic;
+ 		pr_info("hdmitx: get PMT vic: %d\n", para->vic);
+ 	}
+-	if (para && ((para->vic) >= HDMITX_VESA_OFFSET))
++	if (para && ((para->vic) >= HDMITX_VESA_OFFSET)) {
+ 		store_vesa_idx(prxcap, para->vic);
++		pmt_vesa_vic = para->vic;
++	}
++	if (!para && t->hactive && t->vactive) {
++		unsigned int total = (t->hactive + t->hblank) *
++			(t->vactive + t->vblank);
++
++		pmt_hactive = t->hactive;
++		pmt_vactive = t->vactive;
++		/* pixel clock in 10 kHz */
++		pmt_hz = (t->tmds_clk * 10000 + total / 2) / total;
++	}
+ }
+ 
+ static void Edid_Descriptor_PMT2(struct rx_cap *prxcap,
+@@ -2531,6 +2604,8 @@ int hdmitx_edid_parse(struct hdmitx_dev *hdmitx_device)
+ 			Edid_StandardTimingIII(prxcap, &EDID_buf[idx[i] + 6]);
+ 			break;
+ 		case TAG_RANGE_LIMITS:
++			/* max pixel clock, in 10 MHz */
++			range_max_pclk = EDID_buf[idx[i] + 9] * 10000;
+ 			break;
+ 		case TAG_DISPLAY_PRODUCT_NAME_STRING:
+ 			Edid_ReceiverProductNameParse(prxcap,
+@@ -2915,6 +2990,10 @@ enum hdmi_vic hdmitx_edid_get_VIC(struct hdmitx_dev *hdev,
+ 					break;
+ 			}
+ 			if (j >= prxcap->VIC_count)
++				vic = vesa_supported(prxcap, vic) ?
++					vic : HDMI_Unknown;
++			if (vic != HDMI_Unknown &&
++			    beyond_range_limits(prxcap, vic))
+ 				vic = HDMI_Unknown;
+ 		}
+ 	}
+@@ -2950,6 +3029,11 @@ void hdmitx_edid_clear(struct hdmitx_dev *hdmitx_device)
+ 	struct rx_cap *prxcap = &hdmitx_device->rxcap;
+ 
+ 	memset(prxcap, 0, sizeof(struct rx_cap));
++	pmt_vesa_vic = HDMI_Unknown;
++	pmt_hactive = 0;
++	pmt_vactive = 0;
++	pmt_hz = 0;
++	range_max_pclk = 0;
+ 
+ 	/* Note: in most cases, we think that rx is tv and the default
+ 	 * IEEEOUI is HDMI Identifier
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+index 20a8da42..9b397549 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+@@ -2556,6 +2556,10 @@ static ssize_t show_disp_cap(struct device *dev,
+ 	enum hdmi_vic vic;
+ 	char mode_tmp[32];
+ 
++	/* a monitor without a native CEA mode: mark its native VESA mode */
++	if (!native_disp_mode || !strcmp(native_disp_mode, "invalid"))
++		native_disp_mode = hdmitx_edid_get_native_vesa(&hdmitx_device);
++
+ 	if (hdmitx_device.tv_no_edid) {
+ 		pos += snprintf(buf+pos, PAGE_SIZE, "null edid\n");
+ 	} else {
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
+index 83794397..33028b46 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_clk.c
+@@ -1025,6 +1025,7 @@ static struct hw_enc_clk_val_group setting_3dfp_enc_clk_val[] = {
+ 
+ static void hdmitx_set_clk_(struct hdmitx_dev *hdev)
+ {
++	unsigned int hpll;
+ 	int i = 0;
+ 	int j = 0;
+ 	struct hw_enc_clk_val_group *p_enc = NULL;
+@@ -1102,7 +1103,18 @@ static void hdmitx_set_clk_(struct hdmitx_dev *hdev)
+ 	}
+ next:
+ 	hdmitx_set_cts_sys_clk(hdev);
+-	set_hpll_clk_out(p_enc[j].hpll_clk_out);
++	hpll = p_enc[j].hpll_clk_out;
++	/*
++	 * The VESA entries of the table give the PLL output after od1..od3
++	 * (as G12A wants it); the GXL/GXM PLL is set by its VCO frequency,
++	 * which is that value times the od dividers (e.g. 1280x1024:
++	 * 1080000 * 4 = 4320000). Below 2.9 GHz the VCO can not run, so such
++	 * a value can only be the divided one.
++	 */
++	if ((hdev->chip_type == MESON_CPU_ID_GXL ||
++	     hdev->chip_type == MESON_CPU_ID_GXM) && hpll < 2900000)
++		hpll *= p_enc[j].od1 * p_enc[j].od2 * p_enc[j].od3;
++	set_hpll_clk_out(hpll);
+ 	if ((cd == COLORDEPTH_24B) && (hdev->sspll))
+ 		set_hpll_sspll(vic);
+ 	set_hpll_od1(p_enc[j].od1);
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
+index 58cc9513..8fdf36c7 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hw_gxl.c
+@@ -414,6 +414,33 @@ void set_gxl_hpll_clk_out(unsigned int frac_rate, unsigned int clk)
+ 		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
+ 		pr_info("HPLL: 0x%x\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
+ 		break;
++	/* 2560x1080 (198 MHz, VIC 90), 2560x1440 (241.5 MHz):
++	 * VCO = 24 MHz * (M + frac / 1024), M in CNTL[8:0], frac in CNTL1[9:0]
++	 */
++	case 3960000:
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002a5);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL2, 0x860f30c4);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL3, 0x0c8e0000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL4, 0x001fa729);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL5, 0x01a31500);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x1, 28, 1);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x0, 28, 1);
++		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++		pr_info("HPLL: 0x%x\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
++		break;
++	case 4830000:
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002c9);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb100);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL2, 0x860f30c4);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL3, 0x0c8e0000);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL4, 0x001fa729);
++		hd_write_reg(P_HHI_HDMI_PLL_CNTL5, 0x01a31500);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x1, 28, 1);
++		hd_set_reg_bits(P_HHI_HDMI_PLL_CNTL, 0x0, 28, 1);
++		WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++		pr_info("HPLL: 0x%x\n", hd_read_reg(P_HHI_HDMI_PLL_CNTL));
++		break;
+ 	case 4838400:
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL, 0x400002c9);
+ 		hd_write_reg(P_HHI_HDMI_PLL_CNTL1, 0x800cb266);
+diff --git a/include/linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h
+index f5f88924..27fa2cb6 100644
+--- a/include/linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h
+@@ -663,6 +663,7 @@ extern void hdmitx_edid_ram_buffer_clear(struct hdmitx_dev *hdmitx_device);
+ extern void hdmitx_edid_buf_compare_print(struct hdmitx_dev *hdmitx_device);
+ 
+ extern const char *hdmitx_edid_get_native_VIC(struct hdmitx_dev *hdmitx_device);
++const char *hdmitx_edid_get_native_vesa(struct hdmitx_dev *hdev);
+ 
+ /* VSIF: Vendor Specific InfoFrame
+  * It has multiple purposes:
+-- 
+2.34.1
+

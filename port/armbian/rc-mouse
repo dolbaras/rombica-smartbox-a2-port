@@ -1,0 +1,89 @@
+#!/usr/bin/python3
+# rc-mouse -- mouse mode for the Rombica SmartBox A2 remote on Armbian (like the Amlogic Android
+# remote driver does it in the kernel).
+#
+# The mouse key (NEC 0x404044, KEY_PROG1 in /etc/rc_keymaps/rombica_a2.toml) toggles the mode.
+# In mouse mode the remote's input device is grabbed and:
+#   arrows            move the pointer, faster the longer the key is held
+#   OK                left button, MENU right button
+#   PAGEUP/PAGEDOWN   scroll wheel
+#   other keys        passed through unchanged
+import select
+import time
+
+import evdev
+from evdev import ecodes as e
+
+DEVICE_NAME = "meson-ir"
+TOGGLE = e.KEY_PROG1
+MOVES = {e.KEY_LEFT: (-1, 0), e.KEY_RIGHT: (1, 0), e.KEY_UP: (0, -1), e.KEY_DOWN: (0, 1)}
+BUTTONS = {e.KEY_ENTER: e.BTN_LEFT, e.KEY_OK: e.BTN_LEFT, e.KEY_MENU: e.BTN_RIGHT}
+WHEEL = {e.KEY_PAGEUP: 1, e.KEY_PAGEDOWN: -1}
+TICK = 0.02                      # pointer update period while an arrow is held, s
+SPEED_MIN, SPEED_MAX = 2, 24     # pixels per tick
+ACCEL_TIME = 1.2                 # s from SPEED_MIN to SPEED_MAX
+
+
+def find_remote():
+    while True:
+        for path in evdev.list_devices():
+            dev = evdev.InputDevice(path)
+            if dev.name == DEVICE_NAME:
+                return dev
+        time.sleep(2)
+
+
+def main():
+    rc = find_remote()
+    keys = set(rc.capabilities().get(e.EV_KEY, [])) | {e.BTN_LEFT, e.BTN_RIGHT}
+    ui = evdev.UInput({e.EV_KEY: sorted(keys), e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL]},
+                      name="rombica-rc-mouse")
+    mouse = False
+    held = {}                    # arrow key -> time it was pressed
+    while True:
+        timeout = TICK if (mouse and held) else None
+        if select.select([rc.fd], [], [], timeout)[0]:
+            for ev in rc.read():
+                if ev.type != e.EV_KEY:
+                    continue
+                if ev.code == TOGGLE:
+                    if ev.value == 1:
+                        mouse = not mouse
+                        held.clear()
+                        rc.grab() if mouse else rc.ungrab()
+                    continue
+                if not mouse:
+                    continue     # not grabbed: the key already went to the desktop
+                if ev.code in MOVES:
+                    if ev.value == 1:
+                        held[ev.code] = time.monotonic()
+                    elif ev.value == 0:
+                        held.pop(ev.code, None)
+                elif ev.code in BUTTONS:
+                    if ev.value in (0, 1):
+                        ui.write(e.EV_KEY, BUTTONS[ev.code], ev.value)
+                        ui.syn()
+                elif ev.code in WHEEL:
+                    if ev.value in (1, 2):
+                        ui.write(e.EV_REL, e.REL_WHEEL, WHEEL[ev.code])
+                        ui.syn()
+                else:
+                    ui.write(e.EV_KEY, ev.code, ev.value)
+                    ui.syn()
+        if mouse and held:
+            now = time.monotonic()
+            dx = dy = 0
+            for code, since in held.items():
+                t = min((now - since) / ACCEL_TIME, 1.0)
+                step = round(SPEED_MIN + (SPEED_MAX - SPEED_MIN) * t * t)
+                dx += MOVES[code][0] * step
+                dy += MOVES[code][1] * step
+            if dx:
+                ui.write(e.EV_REL, e.REL_X, dx)
+            if dy:
+                ui.write(e.EV_REL, e.REL_Y, dy)
+            ui.syn()
+
+
+if __name__ == "__main__":
+    main()

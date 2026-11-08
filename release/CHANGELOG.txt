@@ -1,0 +1,147 @@
+Rombica SmartBox A2 (Amlogic S905L2 / GXLX, board p271, 1 GB LPDDR3) - Android 9 port
+====================================================================================
+
+Base:     SlimBOX 9.20 for S905X, ATV or AOSP (s905x_wifi_ap6212_*_9_20) - Android userspace
+Kernel:   own build, Amlogic Android P 4.9.113 (Khadas tree) + Rombica A2 patches
+Authors:  Dolbaras, with Claude (Anthropic)
+Sources, tools and full write-up: project README (port/ directory of the project)
+
+v1.3 (2026-10-08)
+-----------------
+ * PC monitors. A 1280x1024 monitor behind an HDMI-VGA adapter showed "input not supported":
+   Android picked 1080p, which the adapter lists for any monitor, and the Amlogic kernel set up
+   VESA modes with a wrong clock on this chip. Now:
+   - the kernel filters modes by the monitor's pixel clock limit (EDID range limits) and knows
+     its VESA modes; the VESA PLL clock is fixed for GXL (patch 0011); the mode tables (timings,
+     sync polarity, clocks) follow VESA DMT (patch 0012);
+   - systemcontrol sets the monitor's native mode, hwcomposer makes the UI that size with a
+     density that keeps elements the size they have on 1080p; the picture position (Settings ->
+     Screen position) is kept per VESA mode;
+   - Screen resolution also offers the monitor's modes (640x480 ... 2560x1440, those it supports);
+   - the bootloader outputs a mode the connected monitor or TV supports (from its EDID), VESA
+     modes included: the boot logo now shows on monitors too; the kernel takes that mode over
+     without setting it again (the VESA mode numbers of bootloader and kernel match), and the
+     boot menu is not stretched on a monitor with another aspect ratio;
+   - monitors get RGB colour (the format of VESA modes), as bootloader and kernel set it, with no
+     format change when Android starts;
+   - the mouse pointer on a monitor stayed in the corner: Android could not parse the mode name
+     "1280x1024p60hz" and did not configure the display; droidlogic.jar now stores the mode in
+     the form Android reads;
+   - "Best resolution" closed Settings with an error on a monitor; it now picks the monitor's
+     native mode, as systemcontrol does.
+ * The GPU is declared as OpenGL ES 2.0, all a Mali-450 can do. SlimBOX declared 3.2 and the
+   Android Extension Pack: apps that need OpenGL ES 3 installed from Play and then failed.
+ * No scripts or services that corrected the system after it started:
+   - the "PC-like" keyboard of the remote desktop mode is in the input library, works at once,
+     without reconnecting the keyboard;
+   - the fixed input library is in the system image instead of being mounted at boot;
+   - front LED: colour roles are kept in properties and applied as kernel LED triggers (no
+     background service);
+   - Advanced settings: Settings itself drops the "Connected devices" screen when there is no
+     Bluetooth (a service used to disable it at every boot).
+ * Amlogic "app optimization" is off. A com.droidlogic service polled the process list 20 times
+   a second and passed it to systemcontrol (about 4% of a CPU core all the time, plus
+   system_server), which switched the CPU's thermal protection off and pinned clocks while a
+   benchmark, a CTS test or Netflix was in front. Thermal protection now always works.
+ * SlimBOX's Autostart app (tv.autostart) crashed at every boot: it read its settings before the
+   user's storage was unlocked. It now waits for the unlock.
+ * Device properties (name, manufacturer, OpenGL ES version) are set in the build.prop files
+   where SlimBOX defines them instead of being overridden by copies.
+ * Kernel log: function names in Amlogic driver messages print as names again, not addresses
+   (patch 0009).
+
+v1.2 (2026-10-01)
+-----------------
+ * Two builds from the same port: SlimBOX 9.20 ATV and SlimBOX 9.20 AOSP (regular launcher);
+   the version and base are written into ro.build.display.id / ro.rombica.port.*.
+ * CPU up to 1.512 GHz (was 1.2). CPU clock and voltage belong to the SCP firmware (BL30); its
+   stock VPLT table stopped at 1200 MHz. The bootloader now carries the Amlogic reference step
+   for this board, 1512 MHz at 1140 mV (the top of the board's voltage range), in place of the
+   667 MHz step. 7-Zip +17%. Tested for 10-15 min at full load in Android and Armbian, no errors,
+   71 C with heatsinks (thermal throttling from 80 C).
+ * Android sometimes hung on the logo after a reboot (from Armbian or recovery), kernel log
+   "emmc: error -110 whilst initialising MMC card". Amlogic's vsprintf printed a symbol or a bare
+   address instead of any string that lay in the kernel text range; the ~1 MB between _text and
+   _stext is ordinary free memory, so heap strings there came out as "0xc013c6c8", the eMMC pin
+   setting name became "0xc013c6c8_all_pins", the data pins were never switched on and the first
+   data command timed out. The substitution is gone (kernel patch 0009).
+ * Mouse cursor: no more smeared cursor. The hwcomposer writes the cursor image into the cursor
+   plane (OSD2) with a tight stride and the kernel padded the stride to 64 bytes, so cursors not
+   16 px wide were sheared; the cursor plane now uses 8-byte alignment (kernel patch 0008).
+ * Mouse pointer: a new pointer image of the same size now reaches the screen (the text cursor
+   no longer stays after leaving a text field, "Large mouse pointer" can be turned off again).
+   The Amlogic hwcomposer copied the cursor only when its size changed; the patched copy copies
+   every new image and re-sets the cursor plane only on a size change (vendor/make_hwc_cursor.py).
+ * Settings -> slimBOXtv settings -> "Mouse and keyboard" (was "Mouse"): new switch "Remote desktop
+   mode" for RustDesk, RuDesktop and the like, applied at once. On: the right mouse button is a
+   right click (SlimBOX's input library always turned it into BACK; a patched copy is used, and
+   BACK is now the kernel's part, kernel patch 0010), and the keyboard works "like on a PC": Win,
+   Alt+Tab, PrintScreen, Enter and Home go to the remote computer instead of opening search,
+   recent apps, a screenshot or the home screen (keyboard mode "Map" in the client). Off: as in
+   SlimBOX (right button = BACK).
+ * Phone settings ("Advanced settings"): "Connected devices" and the Bluetooth screen are hidden,
+   they crashed (the board has no Bluetooth).
+ * Bootloader: boot menu for the Armbian microSD. With a card holding s905_autoscript (our Armbian
+   image) the box shows "Android | Armbian" and waits 10 s for the remote (left = Android); without
+   a card it boots Android as before. The check is in the default U-Boot environment (it survives
+   a factory reset or firmware install); U-Boot gets the irkey command (CONFIG_IR_REMOTE), which
+   sets the IR decoder up for NEC itself (left as is, it saw no remote frames).
+ * Bootloader versions are numbered like the port: U-Boot reports "2015.01-rombica-a2-v1.2"
+   on the serial console (v1.0 and v1.1 shipped the same bootloader, now called v1.0).
+ * "Indicator" and the port info are parts of the system, not apps: no icons in the app list,
+   both open from Settings (TvSettings, the settings app of the ATV and the AOSP build alike).
+ * Version and changelog on the box: Settings -> project slimBOXtv -> "Rombica SmartBox A2 port"
+   (this file, in Russian for a Russian UI). The SlimBOX online patch entries are gone from that
+   screen: they are made for other S905X boxes.
+
+v1.1 (2026-09-30)
+-----------------
+ * Wi-Fi: the Wi-Fi HAL loads and unloads the AP6181 driver (dhd.ko) itself, as its "multi
+   wifi" code expects, instead of init loading it at boot. With the early load the HAL skipped
+   the chip detection, wrote a garbled firmware path and crashed on every Wi-Fi off; turning
+   Wi-Fi off and on again left it dead until a reboot, and now and then Settings (everything
+   touching Wi-Fi) hung. Tested: 10 off/on cycles, reconnected in 6 s each time, no crash.
+ * Remote: mouse mode. The mouse key (scancode 0x44, missing from the stock key map) toggles
+   it; arrows move the pointer, OK clicks (/vendor/etc/remote.tab6, loaded by remotecfg6).
+ * Kernel, modules and bootloader unchanged from v1.0.
+
+v1.0 (2026-09-30)
+-----------------
+Bootloader
+ * Stock VPLT BL2 + BL30 (LPDDR3 2x512 MB, board voltages, CPU table up to 1.2 GHz),
+   SlimBOX BL31 (2019, starts the secondary CPUs of a 32-bit kernel),
+   U-Boot built from Amlogic android-p sources for board gxl_p271_v1 with S905L2 (GXLX)
+   support, built with Linaro GCC 4.8 (the toolchain these sources are written for),
+   packed as Amlogic LZ4C BL33.
+ * U-Boot env matches SlimBOX (system-as-root, SELinux permissive, otg_device, ...).
+ * microSD works in U-Boot (S905L2 port B clock phase); reset button -> USB burning mode.
+
+Kernel (own build from source, no binary patches)
+ * S905L2 (GXLX) handled as a GXL-family SoC with its own GXLX features: picture (OSD RDMA),
+   video decoder and deinterlacer work with the real chip id.
+ * Audio clock: the GXLX MPLL load bit is set, audio plays at the exact rate.
+ * microSD in high-speed mode (about 20 MB/s).
+ * Front LED: bi-colour LED driver (sysled:blue, sysled:red).
+ * Media decoders, Mali-450 MP2 (utgard r8p0) and AP6181 Wi-Fi modules built from source.
+
+Device tree (p271, from SlimBOX p212 + stock VPLT data)
+ * Mali-450 MP2, IR remote (NEC 0x4040), GPIO keys, AP6181 Wi-Fi OOB IRQ, GXLX eMMC/SD/CVBS
+   variants, HS200 eMMC, I2S pins for the sound card (JTAG off), multi-DTB names gxl_p271_*.
+
+Android (vendor)
+ * Wi-Fi firmware path for AP6181 (BCM43362): /vendor/etc/wifi/40181.
+ * Bluetooth removed (AP6181 has none): features declared unavailable, settings entry gone.
+ * Settings -> "Indicator" (in place of Bluetooth): a role for each LED colour - off, on,
+   heartbeat, storage activity, remote key press (app ru.rombica.indicator, service rombica_led).
+ * VP9: the S905L2 has no VP9 hardware; VP9 uses the software decoder (up to 720p), apps use
+   hardware H.264 for 1080p.
+ * Three SlimBOX libraries with a truncated SELinux label relabeled.
+ * Device name: Rombica SmartBox A2.
+
+Known limitations
+ * AC3 / E-AC3 are not decoded on the box (the chip has no Dolby licence; the decoder outputs
+   silence). Use HDMI passthrough to a TV/receiver or a player with its own decoder.
+ * VP9 above 720p and AV1 are not available (no hardware; Android 9 has no AV1 decoder).
+ * Interlaced video in regular apps is not deinterlaced by the hardware deinterlacer (SlimBOX
+   default media.omx.display_mode=0 renders through the GPU).
+ * No field order detection (tb_detect is a closed module built for another kernel).

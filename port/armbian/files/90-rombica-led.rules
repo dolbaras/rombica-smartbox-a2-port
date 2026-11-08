@@ -1,0 +1,8 @@
+# Rombica SmartBox A2 front LED (driver leds-bicolor-gpio, colours rombica:blue / rombica:red):
+# the trigger chosen for each colour (/etc/rombica-led/led.conf) is set when the LED appears, and
+# members of "users" may change the trigger at once (the "Индикатор" window does).
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="rombica:*", IMPORT{file}="/etc/rombica-led/led.conf", \
+  RUN+="/bin/chgrp users /sys%p/trigger /sys%p/brightness", \
+  RUN+="/bin/chmod g+w /sys%p/trigger /sys%p/brightness"
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="rombica:blue", ENV{BLUE}=="?*", ATTR{trigger}="$env{BLUE}"
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="rombica:red", ENV{RED}=="?*", ATTR{trigger}="$env{RED}"

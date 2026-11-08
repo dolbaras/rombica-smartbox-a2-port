@@ -1,0 +1,96 @@
+From 5b4c39e4d2609b92a5062f6bb272ee9bb321cff6 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:08 +0300
+Subject: [PATCH 4/7] amlogic: cpu_version: treat GXLX (S905L2) as a GXL-family
+ SoC
+
+GXLX has major id 0x26, which sorts after TXLX/AXG, so generation checks
+picked code paths of later SoCs (OSD/VPU, video decoder). Report the GXL
+major id and keep GXLX visible via is_meson_gxlx_cpu()/cpu_after_eq(GXLX).
+---
+ drivers/amlogic/cpu_version/meson64_cpu.c | 20 ++++++++++++++++++++
+ include/linux/amlogic/cpu_version.h       | 11 ++++++++++-
+ 2 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/cpu_version/meson64_cpu.c b/drivers/amlogic/cpu_version/meson64_cpu.c
+index ea48b73d..c42ea84e 100644
+--- a/drivers/amlogic/cpu_version/meson64_cpu.c
++++ b/drivers/amlogic/cpu_version/meson64_cpu.c
+@@ -62,6 +62,19 @@ int arch_big_cpu(int cpu)
+ EXPORT_SYMBOL(arch_big_cpu);
+ 
+ static unsigned int cpu_version_init;
++static bool meson_cpu_gxlx;
++
++/*
++ * GXLX (S905L2) is a GXL-family SoC, but its major id 0x26 sorts after TXLX/AXG, so generation
++ * checks (cpu_after_eq(), get_cpu_type() >= ...) would pick code paths of later SoCs. Report
++ * the GXL major id and keep GXLX visible through is_meson_gxlx_cpu() for the blocks that
++ * really differ (see cpu_version.h).
++ */
++bool meson_cpu_is_gxlx(void)
++{
++	return meson_cpu_gxlx;
++}
++EXPORT_SYMBOL(meson_cpu_is_gxlx);
+ int __init meson_cpu_version_init(void)
+ {
+ 	unsigned int ver;
+@@ -80,6 +93,13 @@ int __init meson_cpu_version_init(void)
+ 
+ 	meson_cpu_version[MESON_CPU_VERSION_LVL_MAJOR] =
+ 		readl(assist_hw_rev) >> 24;
++	if (meson_cpu_version[MESON_CPU_VERSION_LVL_MAJOR] ==
++	    MESON_CPU_MAJOR_ID_GXLX) {
++		meson_cpu_gxlx = true;
++		meson_cpu_version[MESON_CPU_VERSION_LVL_MAJOR] =
++			MESON_CPU_MAJOR_ID_GXL;
++		pr_info("Meson GXLX: GXL family\n");
++	}
+ 
+ 	ver = (readl(assist_hw_rev) >> 8) & 0xff;
+ 
+diff --git a/include/linux/amlogic/cpu_version.h b/include/linux/amlogic/cpu_version.h
+index 19e50553..a1b5ac4c 100644
+--- a/include/linux/amlogic/cpu_version.h
++++ b/include/linux/amlogic/cpu_version.h
+@@ -51,12 +51,18 @@ int  meson_cpu_version_init(void);
+ #ifdef CONFIG_AMLOGIC_CPU_VERSION
+ int get_meson_cpu_version(int level);
+ int arch_big_cpu(int cpu);
++bool meson_cpu_is_gxlx(void);
+ #else
+ static inline int get_meson_cpu_version(int level)
+ {
+ 	return -1;
+ }
+ 
++static inline bool meson_cpu_is_gxlx(void)
++{
++	return false;
++}
++
+ static inline int arch_big_cpu(int cpu)
+ {
+ 	return 0;
+@@ -167,9 +173,10 @@ static inline bool is_meson_axg_cpu(void)
+ 	return get_cpu_type() == MESON_CPU_MAJOR_ID_AXG;
+ }
+ 
++/* GXLX reports the GXL major id (GXL family), see meson64_cpu.c */
+ static inline bool is_meson_gxlx_cpu(void)
+ {
+-	return get_cpu_type() == MESON_CPU_MAJOR_ID_GXLX;
++	return meson_cpu_is_gxlx();
+ }
+ 
+ static inline bool is_meson_txhd_cpu(void)
+@@ -203,6 +210,8 @@ static inline bool is_meson_tm2_cpu(void)
+ 
+ static inline bool cpu_after_eq(unsigned int id)
+ {
++	if (id == MESON_CPU_MAJOR_ID_GXLX && meson_cpu_is_gxlx())
++		return true;
+ 	return get_cpu_type() >= id;
+ }
+ 

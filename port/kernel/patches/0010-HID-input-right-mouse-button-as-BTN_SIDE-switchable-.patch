@@ -1,0 +1,75 @@
+From dc3210ebf58f3ce66f3d090e7c45d40bcc539025 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Fri, 2 Oct 2026 02:00:00 +0300
+Subject: [PATCH] HID: input: right mouse button as BTN_SIDE, switchable at run
+ time
+
+A TV box usually wants the right mouse button to be BACK, a remote desktop client needs a real
+right click. SlimBOX's input library hard-wires the right button to BACK; with the port's copy
+that reports it as a right click, the choice is made here instead: while the hid parameter
+right_button_back is set (/sys/module/hid/parameters/right_button_back), the right button of a
+HID mouse is reported as BTN_SIDE, which Android maps to BACK. It takes effect with the next
+press. A release always releases both codes, so a button held while the mode changes does not
+stay down. Mice with a right button also get BTN_SIDE in their key bits, so Android knows the
+code from the start.
+---
+ drivers/hid/hid-input.c | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/hid/hid-input.c b/drivers/hid/hid-input.c
+index 5ff6dd81..cc80c25e 100644
+--- a/drivers/hid/hid-input.c
++++ b/drivers/hid/hid-input.c
+@@ -70,6 +70,15 @@ static const struct {
+ #define map_key_clear(c)	hid_map_usage_clear(hidinput, usage, &bit, \
+ 		&max, EV_KEY, (c))
+ 
++/*
++ * Report the right mouse button as BTN_SIDE ("back") while set. Android maps
++ * BTN_SIDE to BACK, so a TV box can switch the right button between BACK and
++ * a right click at run time.
++ */
++static bool right_button_back;
++module_param(right_button_back, bool, 0644);
++MODULE_PARM_DESC(right_button_back, "Report the right mouse button as BTN_SIDE (back)");
++
+ static bool match_scancode(struct hid_usage *usage,
+ 			   unsigned int cur_idx, unsigned int scancode)
+ {
+@@ -544,7 +553,12 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
+ 
+ 		switch (field->application) {
+ 		case HID_GD_MOUSE:
+-		case HID_GD_POINTER:  code += BTN_MOUSE; break;
++		case HID_GD_POINTER:
++			code += BTN_MOUSE;
++			/* see right_button_back */
++			if (code == BTN_RIGHT)
++				__set_bit(BTN_SIDE, input->keybit);
++			break;
+ 		case HID_GD_JOYSTICK:
+ 				if (code <= 0xf)
+ 					code += BTN_JOYSTICK;
+@@ -1193,6 +1207,19 @@ void hidinput_hid_event(struct hid_device *hid, struct hid_field *field, struct
+ 	    (!test_bit(usage->code, input->key)) == value)
+ 		input_event(input, EV_MSC, MSC_SCAN, usage->hid);
+ 
++	if (usage->type == EV_KEY && usage->code == BTN_RIGHT &&
++	    test_bit(BTN_SIDE, input->keybit)) {
++		if (value) {
++			input_event(input, EV_KEY, right_button_back ?
++				    BTN_SIDE : BTN_RIGHT, value);
++		} else {
++			/* release both: the mode may change while pressed */
++			input_event(input, EV_KEY, BTN_RIGHT, 0);
++			input_event(input, EV_KEY, BTN_SIDE, 0);
++		}
++		return;
++	}
++
+ 	input_event(input, usage->type, usage->code, value);
+ 
+ 	if ((field->flags & HID_MAIN_ITEM_RELATIVE) &&
+-- 
+2.34.1
+

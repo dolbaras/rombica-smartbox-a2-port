@@ -1,0 +1,71 @@
+# Rombica SmartBox A2 (S905L2). The CPU frequency table (max 1.512 GHz) comes from the BL30 of the
+# port's bootloader (stock VPLT BL30 with the table replaced, port/bootloader/bl30_dvfs.py).
+
+# Bring-up aid: with androidboot.rombica_debug=1 on the kernel command line, Android errors/warnings
+# are copied to the kernel log, i.e. to the UART console. Needs SELinux permissive.
+# In U-Boot: setenv EnableSelinux "permissive androidboot.rombica_debug=1"; saveenv
+service rombica_klog /system/bin/logcat -b main -b system -b crash -v brief -f /dev/kmsg *:W
+    user root
+    group root log
+    seclabel u:r:su:s0
+    disabled
+    oneshot
+
+on property:ro.boot.rombica_debug=1 && property:ro.boot.selinux=permissive
+    start rombica_klog
+
+# Front LED: one role per colour of the bi-colour LED (kernel patch 0006: sysled:blue = pin high,
+# sysled:red = pin low, red shown over blue), chosen in the "Indicator" app (ru.rombica.indicator),
+# which stores it in persist.vendor.rombica.led.blue/red through systemcontrol. The kernel's LED
+# triggers do the work; without a choice the kernel default stays (blue on, like the stock
+# firmware). Roles: off | on | heartbeat | storage (eMMC activity) | remote (remote key press).
+on property:persist.vendor.rombica.led.blue=off
+    write /sys/class/leds/sysled:blue/trigger none
+    write /sys/class/leds/sysled:blue/brightness 0
+
+on property:persist.vendor.rombica.led.blue=on
+    write /sys/class/leds/sysled:blue/trigger none
+    write /sys/class/leds/sysled:blue/brightness 255
+
+on property:persist.vendor.rombica.led.blue=heartbeat
+    write /sys/class/leds/sysled:blue/trigger heartbeat
+
+on property:persist.vendor.rombica.led.blue=storage
+    write /sys/class/leds/sysled:blue/trigger emmc
+
+on property:persist.vendor.rombica.led.blue=remote
+    write /sys/class/leds/sysled:blue/trigger rc_feedback
+
+on property:persist.vendor.rombica.led.red=off
+    write /sys/class/leds/sysled:red/trigger none
+    write /sys/class/leds/sysled:red/brightness 0
+
+on property:persist.vendor.rombica.led.red=on
+    write /sys/class/leds/sysled:red/trigger none
+    write /sys/class/leds/sysled:red/brightness 255
+
+on property:persist.vendor.rombica.led.red=heartbeat
+    write /sys/class/leds/sysled:red/trigger heartbeat
+
+on property:persist.vendor.rombica.led.red=storage
+    write /sys/class/leds/sysled:red/trigger emmc
+
+on property:persist.vendor.rombica.led.red=remote
+    write /sys/class/leds/sysled:red/trigger rc_feedback
+
+
+# Remote desktop mode (switch in slimBOXtv settings -> Mouse and keyboard; SlimBOX's own hidden
+# switch, it stores persist.vendor.mouse_touch_input). Applied at once.
+#   1  right mouse button = right click; keyboards with the generic layout "like on a PC" (Win,
+#      Alt+Tab, PrintScreen, Enter, Home go to the remote desktop client)
+#   0  right mouse button = BACK, stock keyboard layout (as in SlimBOX; default)
+# The right button: SlimBOX's input library turned it into BACK; the port's library in the
+# system image reports a right click, and BACK is the kernel's part: while hid right_button_back
+# is set, the right button arrives as BTN_SIDE, which Android maps to BACK (kernel patch 0010).
+# The keyboard: the port's input library reads the property itself on every key press
+# (port/vendor/native/inputflinger).
+on property:persist.vendor.mouse_touch_input=1
+    write /sys/module/hid/parameters/right_button_back N
+
+on property:persist.vendor.mouse_touch_input=0
+    write /sys/module/hid/parameters/right_button_back Y

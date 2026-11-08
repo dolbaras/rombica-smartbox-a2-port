@@ -1,0 +1,27 @@
+From b56e7fd95017e979e4ae2a21a0fe4282cedab7cb Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:08 +0300
+Subject: [PATCH 2/7] remote: build without the Khadas MCU driver
+ (ageing_test_flag only with CONFIG_KHADAS_MCU)
+
+---
+ drivers/amlogic/input/remote/remote_core.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/input/remote/remote_core.c b/drivers/amlogic/input/remote/remote_core.c
+index 78652cc6..7f749d52 100644
+--- a/drivers/amlogic/input/remote/remote_core.c
++++ b/drivers/amlogic/input/remote/remote_core.c
+@@ -45,7 +45,11 @@
+  *enable: 1
+  */
+ static bool remote_debug_enable;
+-extern int ageing_test_flag;
++#ifdef CONFIG_KHADAS_MCU
++extern int ageing_test_flag;	/* Khadas MCU ageing test mutes the remote */
++#else
++#define ageing_test_flag 0
++#endif
+ 
+ void remote_repeat(struct remote_dev *dev)
+ {

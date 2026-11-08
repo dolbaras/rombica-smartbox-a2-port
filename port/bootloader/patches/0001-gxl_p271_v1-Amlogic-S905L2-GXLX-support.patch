@@ -1,0 +1,210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:26:35 +0300
+Subject: [PATCH 1/4] gxl_p271_v1: Amlogic S905L2 (GXLX) support
+
+The Rombica SmartBox A2 is a p271 board with an S905L2, a GXLX chip.
+GXLX is a GXL variant, but this tree takes the GXL paths only for
+MESON_CPU_MAJOR_ID_GXL:
+
+- VPU, VPP, SAR ADC and the HDMI colour depth setup treat GXLX as GXL;
+- microSD (SD_EMMC port B): core phase 3 on GXLX, as the stock GXLX
+  U-Boot uses; with the GXL default (2) reads fail with rx CRC errors
+  at 40 MHz;
+- default environment as in SlimBOX 9's U-Boot, whose Android images
+  expect it: SELinux permissive, otg_device=1, frac_rate_policy=1,
+  colorattribute=444,8bit and SlimBOX's storeargs/storeboot boot
+  arguments (system-as-root).
+---
+ arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c |  6 ++--
+ board/amlogic/configs/gxl_p271_v1.h          | 33 +++++++++++++-------
+ board/amlogic/gxl_p271_v1/gxl_p271_v1.c      |  3 +-
+ drivers/adc/saradc.c                         |  1 +
+ drivers/mmc/aml_sd_emmc.c                    | 10 ++++++
+ drivers/vpp/aml_vpp.c                        |  1 +
+ drivers/vpu/aml_vpu.c                        |  1 +
+ 7 files changed, 41 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
+index f0702ca..03b4332 100644
+--- a/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
++++ b/arch/arm/cpu/armv8/gxl/hdmitx20/hdmitx_set.c
+@@ -2704,7 +2704,8 @@ static void hdmitx_set_hw(struct hdmitx_dev* hdev)
+ 	case HDMI_COLOR_DEPTH_30B:
+ 	case HDMI_COLOR_DEPTH_36B:
+ 	case HDMI_COLOR_DEPTH_48B:
+-		if (cpu_type == MESON_CPU_MAJOR_ID_GXL) {
++		if ((cpu_type == MESON_CPU_MAJOR_ID_GXL) ||
++		    (cpu_type == MESON_CPU_MAJOR_ID_GXLX)) {
+ 			hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 0, 4, 1);
+ 			hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 0, 10, 1);
+ 		} else { /* For GXM and later */
+@@ -2723,7 +2724,8 @@ static void hdmitx_set_hw(struct hdmitx_dev* hdev)
+ 		}
+ 		break;
+ 	default:
+-		if (cpu_type == MESON_CPU_MAJOR_ID_GXL) {
++		if ((cpu_type == MESON_CPU_MAJOR_ID_GXL) ||
++		    (cpu_type == MESON_CPU_MAJOR_ID_GXLX)) {
+ 			hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 0, 4, 1);
+ 			hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 1, 10, 1);
+ 		} else { /* For GXM and later */
+diff --git a/board/amlogic/configs/gxl_p271_v1.h b/board/amlogic/configs/gxl_p271_v1.h
+index 6f772dc..97df890 100644
+--- a/board/amlogic/configs/gxl_p271_v1.h
++++ b/board/amlogic/configs/gxl_p271_v1.h
+@@ -115,7 +115,14 @@
+         "wipe_data=successful\0"\
+         "wipe_cache=successful\0"\
+         "lock=10001000\0"\
+-        "EnableSelinux=enforcing\0"\
++        "EnableSelinux=permissive\0"\
++        "otg_device=1\0"\
++        "frac_rate_policy=1\0"\
++        "colorattribute=444,8bit\0"\
++        "Irq_check_en=0\0"\
++        "page_trace=on\0"\
++        "rpmb_state=0\0"\
++        "sdr2hdr=0\0"\
+         "recovery_part=recovery\0"\
+         "recovery_offset=0\0"\
+         "cvbs_drv=0\0"\
+@@ -132,9 +139,12 @@
+                 "run init_display; run storeargs; run update;"\
+             "else fi;"\
+             "\0"\
+-    "storeargs="\
+-            "setenv bootargs ${initargs} ${fs_type} reboot_mode_android=${reboot_mode_android} androidboot.selinux=${EnableSelinux} logo=${display_layer},loaded,${fb_addr},${outputmode} maxcpus=${maxcpus} vout=${outputmode},enable hdmimode=${hdmimode} cvbsmode=${cvbsmode} hdmitx=${cecconfig} cvbsdrv=${cvbs_drv} androidboot.firstboot=${firstboot} jtag=${jtag}; "\
+-	"setenv bootargs ${bootargs} androidboot.hardware=amlogic;"\
++        /* storeargs/storeboot as in SlimBOX 9 U-Boot: its images expect these arguments */\
++        "storeargs="\
++            "setenv bootargs ${initargs} otg_device=${otg_device} reboot_mode_android=${reboot_mode_android} androidboot.selinux=${EnableSelinux} logo=${display_layer},loaded,${fb_addr},${outputmode} maxcpus=${maxcpus} vout=${outputmode},enable hdmimode=${hdmimode} frac_rate_policy=${frac_rate_policy} cvbsmode=${cvbsmode} hdmitx=${cecconfig},${colorattribute} cvbsdrv=${cvbs_drv} irq_check_en=${Irq_check_en}  androidboot.firstboot=${firstboot} jtag=${jtag}; "\
++            "setenv bootargs ${bootargs} androidboot.veritymode=enforcing androidboot.hardware=amlogic;"\
++            "setenv bootargs ${bootargs} page_trace=${page_trace};"\
++            "setenv bootargs ${bootargs} androidboot.rpmb_state=${rpmb_state};"\
+             "run cmdline_keys;"\
+             "\0"\
+         "switch_bootmode="\
+@@ -169,12 +179,13 @@
+             "get_system_as_root_mode;"\
+             "echo system_mode: ${system_mode};"\
+             "if test ${system_mode} = 1; then "\
+-                    "setenv fs_type ""ro rootwait skip_initramfs"";"\
+-                    "run storeargs;"\
++                    "setenv bootargs ${bootargs} ro rootwait skip_initramfs;"\
++            "else "\
++                    "setenv bootargs ${bootargs} ${fs_type};"\
+             "fi;"\
+             "get_valid_slot;"\
+             "get_avb_mode;"\
+-            "echo active_slot: ${active_slot};"\
++            "echo active_slot: ${active_slot} avb2: ${avb2};"\
+             "if test ${active_slot} != normal; then "\
+                     "setenv bootargs ${bootargs} androidboot.slot_suffix=${active_slot};"\
+             "fi;"\
+@@ -186,7 +197,7 @@
+                 "fi;fi;"\
+             "fi;"\
+             "if imgread kernel ${boot_part} ${loadaddr}; then bootm ${loadaddr}; fi;"\
+-            "run update;"\
++            "run storeargs; run update;"\
+             "\0"\
+         "factory_reset_poweroff_protect="\
+             "echo wipe_data=${wipe_data}; echo wipe_cache=${wipe_cache};"\
+@@ -227,7 +238,7 @@
+             "if fatload mmc 0 ${loadaddr} aml_autoscript; then autoscr ${loadaddr}; fi;"\
+             "if fatload mmc 0 ${loadaddr} recovery.img; then "\
+                     "if fatload mmc 0 ${dtb_mem_addr} dtb.img; then echo sd dtb.img loaded; fi;"\
+-                    "wipeisb; "\
++                    "wipeisb; setenv bootargs ${bootargs} ${fs_type};"\
+                     "bootm ${loadaddr};fi;"\
+             "\0"\
+         "recovery_from_udisk="\
+@@ -235,14 +246,14 @@
+             "if fatload usb 0 ${loadaddr} aml_autoscript; then autoscr ${loadaddr}; fi;"\
+             "if fatload usb 0 ${loadaddr} recovery.img; then "\
+                 "if fatload usb 0 ${dtb_mem_addr} dtb.img; then echo udisk dtb.img loaded; fi;"\
+-                "wipeisb; "\
++                "wipeisb; setenv bootargs ${bootargs} ${fs_type};"\
+                 "bootm ${loadaddr};fi;"\
+             "\0"\
+         "recovery_from_flash="\
+             "get_valid_slot;"\
+             "echo active_slot: ${active_slot};"\
+             "if test ${active_slot} = normal; then "\
+-                "setenv bootargs ${bootargs} aml_dt=${aml_dt} recovery_part={recovery_part} recovery_offset={recovery_offset};"\
++                "setenv bootargs ${bootargs} ${fs_type} aml_dt=${aml_dt} recovery_part={recovery_part} recovery_offset={recovery_offset};"\
+                 "if itest ${upgrade_step} == 3; then "\
+                     "if ext4load mmc 1:2 ${dtb_mem_addr} /recovery/dtb.img; then echo cache dtb.img loaded; fi;"\
+                     "if ext4load mmc 1:2 ${loadaddr} /recovery/recovery.img; then echo cache recovery.img loaded; wipeisb; bootm ${loadaddr}; fi;"\
+diff --git a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+index 8852c3f..c9b870e 100644
+--- a/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
++++ b/board/amlogic/gxl_p271_v1/gxl_p271_v1.c
+@@ -470,7 +470,8 @@ int board_late_init(void){
+ 	aml_try_factory_sdcard_burning(0, gd->bd);
+ #endif// #ifdef CONFIG_AML_V2_FACTORY_BURN
+ 
+-	if (get_cpu_id().family_id == MESON_CPU_MAJOR_ID_GXL) {
++	if ((get_cpu_id().family_id == MESON_CPU_MAJOR_ID_GXL) ||
++	    (get_cpu_id().family_id == MESON_CPU_MAJOR_ID_GXLX)) {
+ 		setenv("maxcpus","4");
+ 	}
+ 	return 0;
+diff --git a/drivers/adc/saradc.c b/drivers/adc/saradc.c
+index 090e7ac..9017530 100644
+--- a/drivers/adc/saradc.c
++++ b/drivers/adc/saradc.c
+@@ -205,6 +205,7 @@ int saradc_value_trim(int val)
+ 
+ 	switch (get_cpu_id().family_id) {
+ 	case MESON_CPU_MAJOR_ID_GXL:
++	case MESON_CPU_MAJOR_ID_GXLX:
+ 	case MESON_CPU_MAJOR_ID_GXM:
+ 	case MESON_CPU_MAJOR_ID_TXL:
+ 		tmp = val * 3072 / 2764;
+diff --git a/drivers/mmc/aml_sd_emmc.c b/drivers/mmc/aml_sd_emmc.c
+index 49f9ce7..4e14916 100644
+--- a/drivers/mmc/aml_sd_emmc.c
++++ b/drivers/mmc/aml_sd_emmc.c
+@@ -191,6 +191,16 @@ void aml_sd_cfg_swth(struct mmc *mmc)
+ 
+     sd_emmc_para_config(sd_emmc_reg, mmc->clock, aml_priv->sd_emmc_port);
+ 
++	/* GXLX (S905L2) SD slot: core phase 3, as the stock GXLX U-Boot uses; with the GXL default
++	 * (2) reads fail with rx CRC errors at 40 MHz. */
++	if (aml_priv->sd_emmc_port == SDIO_PORT_B &&
++	    get_cpu_id().family_id == MESON_CPU_MAJOR_ID_GXLX) {
++		sd_emmc_clkc = sd_emmc_reg->gclock;
++		sd_emmc_clkc &= ~(3 << Cfg_co_phase);
++		sd_emmc_clkc |= (3 << Cfg_co_phase);
++		sd_emmc_reg->gclock = sd_emmc_clkc;
++	}
++
+ 	if (mmc->cfg->ops->calc && (!strcmp(mmc->cfg->name, "SDIO Port C"))) {
+ 		mmc->clk_lay.source = mmc->clock * clk_div;
+ 		mmc->clk_lay.core = mmc->clock;
+diff --git a/drivers/vpp/aml_vpp.c b/drivers/vpp/aml_vpp.c
+index 39bae73..6b53a1a 100644
+--- a/drivers/vpp/aml_vpp.c
++++ b/drivers/vpp/aml_vpp.c
+@@ -489,6 +489,7 @@ static void vpp_set_matrix_default_init(void)
+ 	case MESON_CPU_MAJOR_ID_GXBB:
+ 	case MESON_CPU_MAJOR_ID_GXTVBB:
+ 	case MESON_CPU_MAJOR_ID_GXL:
++	case MESON_CPU_MAJOR_ID_GXLX:
+ 	case MESON_CPU_MAJOR_ID_GXM:
+ 	case MESON_CPU_MAJOR_ID_TXL:
+ 		/* default probe_sel, for highlight en */
+diff --git a/drivers/vpu/aml_vpu.c b/drivers/vpu/aml_vpu.c
+index 779ea1b..52c2c4a 100644
+--- a/drivers/vpu/aml_vpu.c
++++ b/drivers/vpu/aml_vpu.c
+@@ -279,6 +279,7 @@ static void vpu_chip_detect(void)
+ 		vpu_conf.data = &vpu_data_gxtvbb;
+ 		break;
+ 	case MESON_CPU_MAJOR_ID_GXL:
++	case MESON_CPU_MAJOR_ID_GXLX:
+ 		vpu_conf.data = &vpu_data_gxl;
+ 		break;
+ 	case MESON_CPU_MAJOR_ID_GXM:

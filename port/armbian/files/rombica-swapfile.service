@@ -1,0 +1,11 @@
+[Unit]
+Description=Create the 1 GB swap file (Rombica SmartBox A2, first boot)
+ConditionPathExists=!/swapfile
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rombica-swapfile
+
+[Install]
+WantedBy=multi-user.target

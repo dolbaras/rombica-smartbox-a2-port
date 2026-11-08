@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SlimBOX 9.20 TvSettings res/xml/sbx_project.xml (screen "project slimBOXtv") without the
+     SlimBOX online patch entries (made for other S905X boxes, not for this port) and with an
+     entry for the Rombica A2 port: version and changelog (PortInfoActivity of the Indicator app).
+     An overlay can only replace TvSettings resources, not add strings, so the new entry has
+     literal titles: English in xml/, Russian in xml-ru/. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    android:title="@com.android.tv.settings:string/sbxtv_project">
+    <PreferenceScreen
+        android:enabled="false"
+        android:layout="@com.android.tv.settings:layout/sbx_logo_row"
+        android:key="rom_logo" />
+    <Preference android:title="@com.android.tv.settings:string/sbxtv_about_us">
+        <intent android:targetPackage="slim.box.tv.project"
+            android:targetClass="slim.box.tv.project.MainActivity" />
+    </Preference>
+    <Preference android:title="@com.android.tv.settings:string/sbxtv_version">
+        <intent android:targetPackage="slim.box.tv.project"
+            android:targetClass="slim.box.tv.version.MainActivity" />
+    </Preference>
+    <Preference android:title="Rombica SmartBox A2 port" android:summary="Version and changelog" android:key="rombica_port">
+        <intent android:action="ru.rombica.indicator.PORT_INFO" />
+    </Preference>
+    <Preference android:title="@com.android.tv.settings:string/sbxtv_donat">
+        <intent android:targetPackage="slim.box.tv.project"
+            android:targetClass="slim.box.tv.donat.MainActivity" />
+    </Preference>
+</PreferenceScreen>

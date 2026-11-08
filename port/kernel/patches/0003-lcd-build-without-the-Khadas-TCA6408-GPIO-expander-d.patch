@@ -1,0 +1,35 @@
+From 6ed5122b981b5df76c6c2d99b4e4d83c56861dde Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:08 +0300
+Subject: [PATCH 3/7] lcd: build without the Khadas TCA6408 GPIO expander
+ driver
+
+---
+ drivers/amlogic/media/vout/lcd/lcd_common.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/amlogic/media/vout/lcd/lcd_common.c b/drivers/amlogic/media/vout/lcd/lcd_common.c
+index 5144b0a2..3b7ee179 100755
+--- a/drivers/amlogic/media/vout/lcd/lcd_common.c
++++ b/drivers/amlogic/media/vout/lcd/lcd_common.c
+@@ -157,6 +157,7 @@ char *lcd_mode_mode_to_str(int mode)
+ 	return lcd_mode_table[mode];
+ }
+ 
++#ifdef CONFIG_KHADAS_TCA6408
+ extern int tca6408_output_set_value(u8 value, u8 mask);
+ int gpio_expander_direction_output(u8 index, u8 value)
+ {
+@@ -171,6 +172,12 @@ int gpio_expander_direction_output(u8 index, u8 value)
+ 
+ 	return tca6408_output_set_value(val, mask);
+ }
++#else
++int gpio_expander_direction_output(u8 index, u8 value)
++{
++	return -ENODEV;		/* Khadas panel GPIO expander not built */
++}
++#endif
+ 
+ /* **********************************
+  * lcd gpio

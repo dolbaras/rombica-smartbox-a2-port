@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Thu, 1 Oct 2026 17:48:37 +0300
+Subject: [PATCH 2/4] gxl_p271_v1: boot menu from the microSD card
+
+- CONFIG_IR_REMOTE: the irkey command, so a boot script can read the
+  remote. irkey now sets the IR decoder to NEC itself, as the SCP
+  firmware does (scp_remote.c RDECODEMODE_NEC): after power-on it may
+  not be set up at all and after a warm reboot it is left as the kernel
+  set it, so no frame was ever seen.
+- Default bootcmd "run start_sd_menu; run storeboot": if the card holds
+  s905_autoscript (the Armbian image of the port), it runs; the script
+  shows an "Android | Armbian" picture and waits for the remote. Without
+  a card Android boots as before. Being the default environment, the
+  menu survives an environment reset and a firmware install.
+---
+ board/amlogic/configs/gxl_p271_v1.h | 13 +++++++++++--
+ common/cmd_irkey.c                  | 18 +++++++++++++++++-
+ 2 files changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/board/amlogic/configs/gxl_p271_v1.h b/board/amlogic/configs/gxl_p271_v1.h
+index 97df890..7ec7dca 100644
+--- a/board/amlogic/configs/gxl_p271_v1.h
++++ b/board/amlogic/configs/gxl_p271_v1.h
+@@ -76,7 +76,8 @@
+ #define CONFIG_SERIAL_MULTI		1
+ 
+ //Enable ir remote wake up for bl30
+-//#define CONFIG_IR_REMOTE
++/* irkey command: the boot menu on the Armbian microSD (s905_autoscript) reads the remote */
++#define CONFIG_IR_REMOTE 1
+ //#define CONFIG_AML_IRDETECT_EARLY
+ #define CONFIG_IR_REMOTE_POWER_UP_KEY_CNT 4
+ #define CONFIG_IR_REMOTE_USE_PROTOCOL 0         // 0:nec  1:duokan  2:Toshiba 3:rca 4:rcmm
+@@ -175,6 +176,12 @@
+                 "fastboot;"\
+             "fi;fi;fi;fi;fi;fi;"\
+             "\0" \
++        "ab=0\0"\
++        "start_sd_menu="\
++            "if mmcinfo; then "\
++                "if fatload mmc 0 1020000 s905_autoscript; then autoscr 1020000; fi;"\
++            "fi;"\
++            "\0"\
+         "storeboot="\
+             "get_system_as_root_mode;"\
+             "echo system_mode: ${system_mode};"\
+@@ -320,7 +327,9 @@
+             "run upgrade_key;" \
+             "bcb uboot-command;"\
+             "run switch_bootmode;"
+-#define CONFIG_BOOTCOMMAND "run storeboot"
++/* microSD boot menu (Armbian card): run s905_autoscript from the card if there is one, else Android.
++ * Part of the default environment, so an env reset (firmware install, recovery) keeps it. */
++#define CONFIG_BOOTCOMMAND "run start_sd_menu; run storeboot"
+ 
+ //#define CONFIG_ENV_IS_NOWHERE  1
+ #define CONFIG_ENV_SIZE   (64*1024)
+diff --git a/common/cmd_irkey.c b/common/cmd_irkey.c
+index 82bdf99..0ccd9e8 100644
+--- a/common/cmd_irkey.c
++++ b/common/cmd_irkey.c
+@@ -17,6 +17,22 @@ void init_custom_trigger(void)
+ 		setbits_le32(P_AO_RTI_PIN_MUX_REG, 1 << 0);  // SET IR_DEC_INPUT
+ 		clrbits_le32(P_AO_RTI_PIN_MUX_REG, 1 << 21); //CLEAR IR_REMOTE_OUTPUT
+ 	}
++	/*
++	 * NEC decoding as set by the SCP firmware (scp_remote.c RDECODEMODE_NEC): after a warm
++	 * reboot the decoder is left as the kernel set it and after power-on it may not be set
++	 * up at all, so no frame was ever seen.
++	 */
++	writel(477 << 16 | 400 << 0, P_AO_MF_IR_DEC_LDR_ACTIVE);
++	writel(248 << 16 | 202 << 0, P_AO_MF_IR_DEC_LDR_IDLE);
++	writel(130 << 16 | 110 << 0, P_AO_MF_IR_DEC_LDR_REPEAT);
++	writel(60 << 16 | 48 << 0, P_AO_MF_IR_DEC_BIT_0);
++	writel(3 << 28 | (0xFA0 << 12) | 0x13, P_AO_MF_IR_DEC_REG0);
++	writel((111 << 20) | (100 << 10), P_AO_MF_IR_DEC_STATUS);
++	writel(0x9f00, P_AO_MF_IR_DEC_REG1);
++	writel(0x0, P_AO_MF_IR_DEC_REG2);
++	writel(0, P_AO_MF_IR_DEC_DURATN2);
++	writel(0, P_AO_MF_IR_DEC_DURATN3);
++	readl(P_AO_MF_IR_DEC_FRAME);		/* drop a stale frame */
+ 	writel((readl(P_AO_MF_IR_DEC_REG1) | (1 << 15)), P_AO_MF_IR_DEC_REG1);
+ }
+ 
+@@ -88,7 +104,7 @@ static int do_irkey(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
+ 		}
+ 	}
+ 	ir_release();
+-	return -1;
++	return CMD_RET_FAILURE;		/* timeout: no key, but no usage text either */
+ }
+ /*Maxium key arguments: 10*/
+ U_BOOT_CMD(

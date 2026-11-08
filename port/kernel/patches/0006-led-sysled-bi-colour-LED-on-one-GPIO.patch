@@ -1,0 +1,187 @@
+From ddd3014d4674d03205f2b73adfa0646725bb16a6 Mon Sep 17 00:00:00 2001
+From: Dolbaras <dolbaras@localhost>
+Date: Wed, 30 Sep 2026 00:23:09 +0300
+Subject: [PATCH 6/7] led: sysled: bi-colour LED on one GPIO
+
+Boards like the Rombica SmartBox A2 have one bi-colour LED on the sysled pin:
+high = one colour, low = the other, input = off. With DT led_bicolor =
+"<high colour>", "<low colour>" the driver registers two LED class
+devices (sysled:<colour>); the low-level colour wins when both are on, both
+off puts the pin in input mode. The state is kept over suspend/resume (BL30
+shows the standby colour).
+---
+ drivers/amlogic/led/led_sys.c | 79 +++++++++++++++++++++++++++++++----
+ drivers/amlogic/led/led_sys.h |  8 ++++
+ 2 files changed, 79 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/amlogic/led/led_sys.c b/drivers/amlogic/led/led_sys.c
+index eef79acc..9b7a8f71 100644
+--- a/drivers/amlogic/led/led_sys.c
++++ b/drivers/amlogic/led/led_sys.c
+@@ -46,6 +46,17 @@ static void aml_sysled_output_setup(struct aml_sysled_dev *ldev,
+ 	gpio_direction_output(ldev->d.pin, level);
+ }
+ 
++/* bi-colour: the low-level colour wins when both are on, e.g. red flashes over steady blue */
++static void aml_sysled_bicolor_apply(struct aml_sysled_dev *ldev)
++{
++	if (ldev->low_brightness)
++		gpio_direction_output(ldev->d.pin, 0);
++	else if (ldev->new_brightness)
++		gpio_direction_output(ldev->d.pin, 1);
++	else
++		gpio_direction_input(ldev->d.pin);
++}
++
+ static void aml_sysled_work(struct work_struct *work)
+ {
+ 	struct aml_sysled_dev *ldev;
+@@ -53,10 +64,23 @@ static void aml_sysled_work(struct work_struct *work)
+ 	ldev = container_of(work, struct aml_sysled_dev, work);
+ 
+ 	mutex_lock(&ldev->lock);
+-	aml_sysled_output_setup(ldev, ldev->new_brightness);
++	if (ldev->bicolor)
++		aml_sysled_bicolor_apply(ldev);
++	else
++		aml_sysled_output_setup(ldev, ldev->new_brightness);
+ 	mutex_unlock(&ldev->lock);
+ }
+ 
++static void aml_sysled_low_brightness_set(struct led_classdev *cdev,
++	enum led_brightness value)
++{
++	struct aml_sysled_dev *ldev =
++		container_of(cdev, struct aml_sysled_dev, cdev_low);
++
++	ldev->low_brightness = value;
++	schedule_work(&ldev->work);
++}
++
+ 
+ static void aml_sysled_brightness_set(struct led_classdev *cdev,
+ 	enum led_brightness value)
+@@ -96,6 +120,19 @@ static int aml_sysled_dt_parse(struct platform_device *pdev)
+ 	pr_info("led_gpio = %u\n", ldev->d.pin);
+ 	pr_info("active_low = %u\n", ldev->d.active_low);
+ 	gpio_request(ldev->d.pin, AML_DEV_NAME);
++	if (of_property_count_strings(node, "led_bicolor") == 2) {
++		const char *hi, *lo;
++
++		of_property_read_string_index(node, "led_bicolor", 0, &hi);
++		of_property_read_string_index(node, "led_bicolor", 1, &lo);
++		snprintf(ldev->name_high, sizeof(ldev->name_high), "%s:%s",
++			AML_DEV_NAME, hi);
++		snprintf(ldev->name_low, sizeof(ldev->name_low), "%s:%s",
++			AML_DEV_NAME, lo);
++		ldev->bicolor = true;
++		pr_info("bi-colour LED: %s (high) / %s (low)\n", hi, lo);
++		return 0;	/* pin state is set in probe */
++	}
+ 	gpio_direction_output(ldev->d.pin, 1);
+ 
+ 	return 0;
+@@ -127,18 +164,35 @@ static int aml_sysled_probe(struct platform_device *pdev)
+ 		return ret;
+ 
+ 	/* register led class device */
+-	ldev->cdev.name = AML_LED_NAME;
++	ldev->cdev.name = ldev->bicolor ? ldev->name_high : AML_LED_NAME;
+ 	ldev->cdev.brightness_set = aml_sysled_brightness_set;
+ 	mutex_init(&ldev->lock);
+ 	INIT_WORK(&ldev->work, aml_sysled_work);
++	if (ldev->bicolor) {
++		/* default: high-level colour on, like the stock firmware */
++		ldev->cdev.brightness = LED_FULL;
++		ldev->new_brightness = LED_FULL;
++		ldev->cdev_low.name = ldev->name_low;
++		ldev->cdev_low.brightness_set = aml_sysled_low_brightness_set;
++		ret = led_classdev_register(&pdev->dev, &ldev->cdev_low);
++		if (ret < 0) {
++			kfree(ldev);
++			return ret;
++		}
++	}
+ 	ret = led_classdev_register(&pdev->dev, &ldev->cdev);
+ 	if (ret < 0) {
++		if (ldev->bicolor)
++			led_classdev_unregister(&ldev->cdev_low);
+ 		kfree(ldev);
+ 		return ret;
+ 	}
+ 
+ 	/* set led default on */
+-	aml_sysled_output_setup(ldev, 1);
++	if (ldev->bicolor)
++		aml_sysled_bicolor_apply(ldev);
++	else
++		aml_sysled_output_setup(ldev, 1);
+ 
+ 	pr_info("module probed ok\n");
+ 	return 0;
+@@ -150,6 +204,8 @@ static int __exit aml_sysled_remove(struct platform_device *pdev)
+ 	struct aml_sysled_dev *ldev = platform_get_drvdata(pdev);
+ 
+ 	led_classdev_unregister(&ldev->cdev);
++	if (ldev->bicolor)
++		led_classdev_unregister(&ldev->cdev_low);
+ 	cancel_work_sync(&ldev->work);
+ 	gpio_free(ldev->d.pin);
+ 	platform_set_drvdata(pdev, NULL);
+@@ -163,7 +219,10 @@ static void aml_sysled_shutdown(struct platform_device *pdev)
+ {
+ 	struct aml_sysled_dev *ldev = platform_get_drvdata(pdev);
+ 	/* set led off*/
+-	aml_sysled_output_setup(ldev, 0);
++	if (ldev->bicolor)
++		gpio_direction_input(ldev->d.pin);
++	else
++		aml_sysled_output_setup(ldev, 0);
+ 	pr_info("module shutdown ok\n");
+ }
+ 
+@@ -172,8 +231,9 @@ static void aml_sysled_shutdown(struct platform_device *pdev)
+ static int aml_sysled_suspend(struct platform_device *pdev, pm_message_t state)
+ {
+ 	struct aml_sysled_dev *ldev = platform_get_drvdata(pdev);
+-	/* set led off */
+-	aml_sysled_output_setup(ldev, 0);
++	/* set led off (bi-colour: BL30 shows the standby colour) */
++	if (!ldev->bicolor)
++		aml_sysled_output_setup(ldev, 0);
+ 	pr_info("module suspend ok\n");
+ 	return 0;
+ }
+@@ -181,8 +241,11 @@ static int aml_sysled_suspend(struct platform_device *pdev, pm_message_t state)
+ static int aml_sysled_resume(struct platform_device *pdev)
+ {
+ 	struct aml_sysled_dev *ldev = platform_get_drvdata(pdev);
+-	/* set led on */
+-	aml_sysled_output_setup(ldev, 1);
++	/* set led on (bi-colour: restore the chosen state) */
++	if (ldev->bicolor)
++		schedule_work(&ldev->work);
++	else
++		aml_sysled_output_setup(ldev, 1);
+ 	pr_info("module resume ok\n");
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/led/led_sys.h b/drivers/amlogic/led/led_sys.h
+index c07f0fe0..c23568bf 100644
+--- a/drivers/amlogic/led/led_sys.h
++++ b/drivers/amlogic/led/led_sys.h
+@@ -39,6 +39,14 @@ struct aml_sysled_dev {
+ 	struct aml_led_gpio d;
+ 	struct led_classdev cdev;
+ 	enum led_brightness new_brightness;
++	/*
++	 * bi-colour LED on one pin (DT "led_bicolor" = <colour at high level>, <colour at low
++	 * level>): cdev drives the pin high, cdev_low drives it low, both off = pin as input.
++	 */
++	bool bicolor;
++	struct led_classdev cdev_low;
++	enum led_brightness low_brightness;
++	char name_high[32], name_low[32];
+ 
+ 	struct work_struct work;
+ 	struct mutex lock;
